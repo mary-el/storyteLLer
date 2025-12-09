@@ -1,4 +1,4 @@
 dotenv~=1.0.1
 langgraph~=1.0.4
 langchain~=0.3.25
-langgraph~=1.0.4
+trustcall~=0.0.39
