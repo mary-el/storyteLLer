@@ -1,3 +1,7 @@
-from app.agents.character_gen import build_graph
+from app.agents.character_gen import CharacterGenerator
+from app.agents.world_gen import WorldGenerator
 
-graph = build_graph()
+character_generator = CharacterGenerator()
+character_graph = character_generator.build_graph()
+world_generator = WorldGenerator()
+world_graph = world_generator.build_graph()

@@ -13,7 +13,16 @@ class Character(BaseModel):
     inventory: str = Field("Empty", description="The inventory of the character")
     relationships: str = Field("Unknown", description="The relationships of the character")
 
-def character_reducer(left: Character | None, right: Character | None) -> Character:
+class World(BaseModel):
+    name: str = Field("Unknown", description="The name of the world")
+    description: str = Field("Unknown", description="The description of the world")
+    history: str = Field("Unknown", description="The history of the world")
+    culture: str = Field("Unknown", description="The culture of the world")
+    technology: str = Field("Unknown", description="The technology of the world")
+    politics: str = Field("Unknown", description="The politics of the world")
+    economy: str = Field("Unknown", description="The economy of the world")
+
+def reducer(left: Character | None, right: Character | None) -> Character:
     """Reducer function to ensure character is always initialized"""
     if right is not None:
         return right
@@ -21,6 +30,10 @@ def character_reducer(left: Character | None, right: Character | None) -> Charac
         return left
     return Character()
 
-class GenerateCharacterState(MessagesState):
-    character: Annotated[Character, character_reducer]
+class State(MessagesState):
     status: NotRequired[Literal["created", "in_progress"]]
+class GenerateCharacterState(State):
+    character: Character
+
+class GenerateWorldState(State):
+    world: World
