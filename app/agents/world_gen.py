@@ -30,6 +30,7 @@ class WorldGenerator(ObjectGenerator):
             self.llm,
             tools=[World],
             tool_choice="required", # Enforces use of the World tool
+            enable_inserts=True
         )
 
     def extract(self, state: GenerateWorldState):
@@ -37,15 +38,16 @@ class WorldGenerator(ObjectGenerator):
         Create the world from the conversation.
         """
         messages = state.get('messages', [])
-        # existing_world_obj = state.get('world')
-        # if isinstance(existing_world_obj, dict):
-        #     existing_world = existing_world_obj
-        # else:
-        #     existing_world = existing_world_obj.model_dump()
-        
+        existing_world_obj = state.get('world', World())
+
+        if isinstance(existing_world_obj, dict):
+            existing_world = existing_world_obj
+        else:
+            existing_world = existing_world_obj.model_dump()
+        print(existing_world)
         response = self.trustcall_extractor.invoke({
-            "messages": [SystemMessage(content=self.extraction_instructions)] + messages,
-            # "existing": {"World": existing_world} if existing_world else {}
+            "messages": [SystemMessage(content=self.extraction_instructions)] + self.trim_messages(messages),
+            "existing": {"World": existing_world} if existing_world else {}
         })
         if len(response["responses"]) == 0:
             return {}

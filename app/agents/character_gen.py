@@ -9,7 +9,6 @@ dotenv.load_dotenv()
 class CharacterGenerator(ObjectGenerator):
     def __init__(self):
         super().__init__()
-        # llm = ChatOpenAI(model="qwen/qwen3-4b-thinking-2507", base_url="http://127.0.0.1:1234/v1")
 
         self.generation_instructions = """
         You are a character generator helper. Follow these instructions:

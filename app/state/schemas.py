@@ -1,7 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import TypedDict, Literal, Annotated, NotRequired
 from langgraph.graph import StateGraph, MessagesState, START, END
-from langchain_core.messages import BaseMessage
 
 class Character(BaseModel):
     name: str = Field("Unknown", description="The name of the character")
