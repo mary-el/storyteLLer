@@ -8,8 +8,8 @@ from trustcall import create_extractor
 dotenv.load_dotenv()
 
 class WorldGenerator(ObjectGenerator):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         # llm = ChatOpenAI(model="qwen/qwen3-4b-thinking-2507", base_url="http://127.0.0.1:1234/v1")
 
         self.generation_instructions = """
@@ -53,5 +53,9 @@ class WorldGenerator(ObjectGenerator):
             return {}
         # Extract world - handle both dict and World object
         world_response = response["responses"][0]
+        # Write the world to memory
+        if self.memory_store and self.namespace:
+            self.memory_store.put(self.namespace, "world", world_response)
+
         # Write the world to state
         return {"world": world_response}

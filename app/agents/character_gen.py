@@ -7,8 +7,8 @@ from trustcall import create_extractor
 dotenv.load_dotenv()
 
 class CharacterGenerator(ObjectGenerator):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
         self.generation_instructions = """
         You are a character generator helper. Follow these instructions:
@@ -50,5 +50,7 @@ class CharacterGenerator(ObjectGenerator):
             return {}
         # Extract character - handle both dict and Character object
         character_response = character["responses"][0]
+        if self.memory_store and self.namespace:
+            self.memory_store.put(self.namespace, "character", character_response)
         # Write the character to state
         return {"character": character_response}

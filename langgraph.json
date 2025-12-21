@@ -1,8 +1,8 @@
 {
     "dockerfile_lines": [],
     "graphs": {
-      "character_generator": "./app/main.py:character_graph",
-      "world_generator": "./app/main.py:world_graph"
+      "character_generator": "./app/main_dev.py:character_graph",
+      "world_generator": "./app/main_dev.py:world_graph"
     },
     "env": "./.env",
     "python_version": "3.11",
