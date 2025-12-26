@@ -1,8 +1,10 @@
 from pydantic import BaseModel, Field
 from typing import TypedDict, Literal, Annotated, NotRequired
 from langgraph.graph import StateGraph, MessagesState, START, END
-
-class Character(BaseModel):
+import uuid
+class BaseObject(BaseModel):
+    object_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+class Character(BaseObject):
     name: str = Field("Unknown", description="The name of the character")
     appearance: str = Field("Unknown", description="The appearance of the character")
     personality: str = Field("Unknown", description="The personality of the character")
@@ -12,7 +14,7 @@ class Character(BaseModel):
     inventory: str = Field("Empty", description="The inventory of the character")
     relationships: str = Field("Unknown", description="The relationships of the character")
 
-class World(BaseModel):
+class World(BaseObject):
     name: str = Field("Unknown", description="The name of the world")
     description: str = Field("Unknown", description="The description of the world")
     history: str = Field("Unknown", description="The history of the world")
@@ -31,8 +33,11 @@ def reducer(left: Character | None, right: Character | None) -> Character:
 
 class State(MessagesState):
     status: NotRequired[Literal["created", "in_progress"]]
+    user_id: NotRequired[str]
+    generated_object: NotRequired[BaseObject]
+
 class GenerateCharacterState(State):
-    character: Character
+    pass
 
 class GenerateWorldState(State):
-    world: World
+    pass
