@@ -38,7 +38,7 @@ class ObjectGenerator:
         """Create the trustcall extractor using the object class"""
         return create_extractor(
             self.llm,
-            tools=[self.object_class],
+            tools=[self.entity_class],
             tool_choice="required",
             enable_inserts=self.enable_inserts
         )
@@ -46,7 +46,13 @@ class ObjectGenerator:
     @property
     @abstractmethod
     def object_class(self):
-        """ Return the object class (e.g., Character, World) """
+        """ Return the object class (e.g., CharacterObject, WorldObject) """
+        raise NotImplementedError("Subclasses must implement this property")
+    
+    @property
+    @abstractmethod
+    def entity_class(self):
+        """ Return the entity class (e.g., Character, World) """
         raise NotImplementedError("Subclasses must implement this property")
     
     @property
@@ -67,11 +73,12 @@ class ObjectGenerator:
         messages = state.get('messages', [])
         # Trim messages to avoid token limits and potential serialization issues
         trimmed_messages = self.trim_messages(messages)
-        existing_object_obj = state.get("generated_object").model_dump()
-        object_id = existing_object_obj.get("object_id")
-        existing_object_obj.pop("object_id")
+        existing_object = state.get("generated_object")
+        # Access attribute directly since existing_object is a Pydantic model, not a dict
+        field_value = getattr(existing_object, self.object_field_name)
+        existing_object_obj = field_value.model_dump()
         # Get the tool name (class name)
-        tool_name = self.object_class.__name__
+        tool_name = self.entity_class.__name__
         
         # Invoke extractor
         result = self.trustcall_extractor.invoke({
@@ -84,16 +91,14 @@ class ObjectGenerator:
         
         # Extract object - handle both dict and object cases
         object_response = result["responses"][0]
-        object_response.object_id = object_id
-        
-        # Get the object ID - handle both dict and object cases
-        
+        # Set attribute directly since existing_object is a Pydantic model, not a dict
+        setattr(existing_object, self.object_field_name, object_response)
         # Save to memory store using namespace and object ID
         namespace = (state.get('user_id'), "memories")
-        if self.memory_store and namespace and object_id:
-            self.memory_store.put(namespace, object_id, object_response)
+        if self.memory_store and namespace:
+            self.memory_store.put(namespace, existing_object.object_id, existing_object)
         # Write the object to state
-        return {"generated_object": object_response}
+        return {"generated_object": existing_object}
 
     def human_feedback(self, state: State):
         """ No-op node that should be interrupted on """

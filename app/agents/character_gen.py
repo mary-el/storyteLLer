@@ -1,4 +1,4 @@
-from app.state.schemas import GenerateCharacterState, Character
+from app.state.schemas import GenerateCharacterState, Character, CharacterObject
 from app.agents.object_gen import ObjectGenerator
 import dotenv
 
@@ -23,9 +23,14 @@ class CharacterGenerator(ObjectGenerator):
         """
 
     @property
-    def object_class(self):
-        return Character
-    
-    @property
     def object_field_name(self):
         return "character"
+        
+    @property
+    def entity_class(self):
+        return Character
+    
+
+    @property
+    def object_class(self):
+        return CharacterObject

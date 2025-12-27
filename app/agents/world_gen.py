@@ -1,4 +1,4 @@
-from app.state.schemas import GenerateWorldState, World
+from app.state.schemas import GenerateWorldState, World, WorldObject
 from app.agents.object_gen import ObjectGenerator
 import dotenv
 
@@ -24,9 +24,13 @@ class WorldGenerator(ObjectGenerator):
         """
 
     @property
-    def object_class(self):
+    def object_field_name(self):
+        return "world"
+    
+    @property
+    def entity_class(self):
         return World
     
     @property
-    def object_field_name(self):
-        return "world"
+    def object_class(self):
+        return WorldObject
