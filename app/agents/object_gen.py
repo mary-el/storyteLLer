@@ -6,6 +6,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import BaseMessage
+from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
 from typing import Optional
 from app.state.schemas import State
@@ -18,8 +19,8 @@ dotenv.load_dotenv()
 EXTRACT_EVERY_N_MESSAGES = 3
 MAX_MESSAGES = 5
 class ObjectGenerator:
-    def __init__(self, langdev: bool = False, memory_store: Optional[InMemoryStore] = None, enable_inserts: bool = False):
-        self.llm = ChatOpenAI(model="rag-runtime", base_url="http://127.0.0.1:3000/v1", temperature=0.3)
+    def __init__(self, langdev: bool = False, memory_store: Optional[InMemoryStore] = None):
+        self.llm = ChatOpenAI(model="rag-runtime", base_url="http://127.0.0.1:8000/v1", temperature=0.3)
 
         self.generation_instructions = "Generate a description of the object."
         self.extraction_instructions = "Extract the object from the following conversation."
@@ -29,7 +30,6 @@ class ObjectGenerator:
         self.memory_store = memory_store
         self.langdev = langdev
         self.checkpointer = MemorySaver() if not langdev else None
-        self.enable_inserts = enable_inserts
         # Create extractor using the object class
         self.trustcall_extractor = self._create_extractor()
         self.graph = self.build_graph()
@@ -40,7 +40,7 @@ class ObjectGenerator:
             self.llm,
             tools=[self.entity_class],
             tool_choice="required",
-            enable_inserts=self.enable_inserts
+            enable_inserts=False
         )
 
     @property
@@ -61,15 +61,19 @@ class ObjectGenerator:
         """ Return the field name in state (e.g., 'character', 'world') """
         raise NotImplementedError("Subclasses must implement this property")
     
-    def initialize_object_node(self, state: State):
+    def initialize_object_node(self, state: State, store: BaseStore = None):
         """ Initialize the object with an ID if it doesn't exist. """
+        store = store or self.memory_store
         obj = self.object_class()
+        namespace = (state.get('user_id', 'default'), "memories")
+        store.put(namespace, obj.object_id, obj)
         return {"generated_object": obj}
 
-    def extract(self, state: State):
+    async def extract(self, state: State, store: BaseStore = None):
         """
         Extract the object from the conversation.   
         """
+        store = store or self.memory_store
         messages = state.get('messages', [])
         # Trim messages to avoid token limits and potential serialization issues
         trimmed_messages = self.trim_messages(messages)
@@ -79,33 +83,35 @@ class ObjectGenerator:
         existing_object_obj = field_value.model_dump()
         # Get the tool name (class name)
         tool_name = self.entity_class.__name__
-        
-        # Invoke extractor
-        result = self.trustcall_extractor.invoke({
-            "messages": trimmed_messages + [SystemMessage(content=self.extraction_instructions)],
-            "existing": {tool_name: existing_object_obj}
-        })
-        
-        if len(result["responses"]) == 0:
+        try:
+            # Invoke extractor
+            result = await self.trustcall_extractor.ainvoke({
+                "messages": trimmed_messages + [SystemMessage(content=self.extraction_instructions)],
+                "existing": {tool_name: existing_object_obj}
+            })
+            
+            if len(result["responses"]) == 0:
+                return {}
+            
+            # Extract object - handle both dict and object cases
+            object_response = result["responses"][0]
+            # Set attribute directly since existing_object is a Pydantic model, not a dict
+            setattr(existing_object, self.object_field_name, object_response)
+            # Save to memory store using namespace and object ID
+            namespace = (state.get('user_id', 'default'), "memories")
+            store.put(namespace, existing_object.object_id, existing_object)
+            # Write the object to state
+            return {"generated_object": existing_object}
+        except Exception as e:
+            print(f"Error extracting object: {e}")
             return {}
-        
-        # Extract object - handle both dict and object cases
-        object_response = result["responses"][0]
-        # Set attribute directly since existing_object is a Pydantic model, not a dict
-        setattr(existing_object, self.object_field_name, object_response)
-        # Save to memory store using namespace and object ID
-        namespace = (state.get('user_id'), "memories")
-        if self.memory_store and namespace:
-            self.memory_store.put(namespace, existing_object.object_id, existing_object)
-        # Write the object to state
-        return {"generated_object": existing_object}
 
-    def human_feedback(self, state: State):
+    async def human_feedback(self, state: State, store: BaseStore = None):
         """ No-op node that should be interrupted on """
         feedback = interrupt("Please provide feedback on the object.")
         return {"messages": [HumanMessage(content=feedback)]}
     
-    def should_extract(self, state: State):
+    def should_extract(self, state: State, store: BaseStore = None):
         """ Return if the extract node should be executed """
         # Check if object is created or max messages reached
         status = state.get('status', 'in_progress')
@@ -116,7 +122,7 @@ class ObjectGenerator:
         # Otherwise continue to human feedback
         return "human_feedback"
     
-    def should_continue(self, state: State):
+    def should_continue(self, state: State, store: BaseStore = None):
         """ Return the next node to execute """
         # Check if object is created
         status = state.get('status', 'in_progress')
@@ -125,12 +131,12 @@ class ObjectGenerator:
         # Otherwise continue to human feedback
         return "human_feedback"
     
-    def generate_description(self, state: State):
+    async def generate_description(self, state: State, store: BaseStore = None):
         """ Generate a description of the object. """
         # Generate character description
         messages = self.trim_messages(state.get('messages', []))
         self.current_message_count += 1
-        answer = self.llm.invoke(messages + [SystemMessage(content=self.generation_instructions)])
+        answer = await self.llm.ainvoke(messages + [SystemMessage(content=self.generation_instructions)])
 
         if answer.content.lower().strip() == "done":
             return {"status": "created"}
@@ -167,31 +173,32 @@ class ObjectGenerator:
 
         return self.graph
 
-    def run(self, input: str, config: dict):
+    async def run(self, input: str, config: dict):
         """ Run the graph """
-        # Extract user_id from config if provided, otherwise use thread_id as user_id
+        # Extract user_id from config if provided, otherwise use default as user_id
         configurable = config.get("configurable", {})
-        user_id = configurable.get("user_id") or configurable.get("thread_id")
+        user_id = configurable.get("user_id", "default")
         initial_state = {"messages": [HumanMessage(content=input)]}
         initial_state["user_id"] = user_id
-        return self.graph.stream(initial_state, config, stream_mode="values")
+        return await self.graph.astream(initial_state, config, stream_mode="values")
 
-    def send_feedback(self, input: str, config: dict):
-        return self.graph.stream(Command(resume=(input)), config, stream_mode="values")
+    async def send_feedback(self, input: str, config: dict):
+        return self.graph.astream(Command(resume=(input)), config, stream_mode="values")
     
-    def initialize_object(self, config: dict) -> str:
+    async def initialize_object(self, config: dict, store: BaseStore = None) -> str:
         """
         Initialize the object and return its ID.
         Invokes the graph to run initialize_object_node which creates the object with an ID.
         """
+        store = store or self.memory_store
         # Extract user_id from config if provided, otherwise use thread_id as user_id
         configurable = config.get("configurable", {})
-        user_id = configurable.get("user_id") or configurable.get("thread_id")
+        user_id = configurable.get("user_id", "default")
         thread_id = configurable.get("thread_id")
         
         # Use stream to get state after initialization node runs
         # The graph will run: initialize_object -> human_feedback (interrupts)
-        state_updates = self.graph.invoke({"messages": [], "user_id": user_id}, config)
+        state_updates = await self.graph.ainvoke({"messages": [], "user_id": user_id}, config)
         # Get the object from the initial state (created by initialize_object_node)
         object_data = state_updates.get("generated_object")
         if object_data:

@@ -5,11 +5,10 @@ import dotenv
 from langgraph.store.memory import InMemoryStore
 dotenv.load_dotenv()
 
-in_memory_store = InMemoryStore()
-user_id = "1"
-namespace = (user_id, "memories")
-
-character_generator = CharacterGenerator(langdev=False, memory_store=in_memory_store, namespace=namespace)
+# Namespace is now constructed dynamically from user_id in config
+# When invoking the graph via API, include user_id in config:
+# config = {"configurable": {"thread_id": "user_123", "user_id": "user_123"}}
+character_generator = CharacterGenerator(langdev=True)
 character_graph = character_generator.build_graph()
-world_generator = WorldGenerator(langdev=False, memory_store=in_memory_store, namespace=namespace)
+world_generator = WorldGenerator(langdev=True)
 world_graph = world_generator.build_graph()

@@ -5,6 +5,7 @@ import uuid
 class BaseObject(BaseModel):
     object_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
 class Character(BaseModel):
+    """A character in the story. Do not add nonexistent fields."""
     name: str = Field("Unknown", description="The name of the character")
     appearance: str = Field("Unknown", description="The appearance of the character")
     personality: str = Field("Unknown", description="The personality of the character")
@@ -15,6 +16,7 @@ class Character(BaseModel):
     relationships: str = Field("Unknown", description="The relationships of the character")
 
 class World(BaseModel):
+    """A world in the story. Do not add nonexistent fields."""
     name: str = Field("Unknown", description="The name of the world")
     description: str = Field("Unknown", description="The description of the world")
     history: str = Field("Unknown", description="The history of the world")

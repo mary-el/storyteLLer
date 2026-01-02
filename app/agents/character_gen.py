@@ -11,7 +11,7 @@ class CharacterGenerator(ObjectGenerator):
         self.generation_instructions = """
         You are a character generator helper. Follow these instructions:
         1. Review the conversation;
-        2. If human is satisfied with the character, return only the word "done".
+        2. If human is satisfied with the character and tells it explicitly, return only the word "done".
         3. Otherwise, (re)write a character description based on the human feedback or ask for more feedback.
         Be concise, use the same language as the user.
         """
