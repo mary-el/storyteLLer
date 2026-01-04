@@ -1,8 +1,11 @@
-from app.state.schemas import GenerateWorldState, World, WorldObject
-from app.agents.object_gen import ObjectGenerator
 import dotenv
 
+from app.agents.object_gen import ObjectGenerator
+from app.state.schemas import World, WorldObject
+from app.utils import logger
+
 dotenv.load_dotenv()
+
 
 class WorldGenerator(ObjectGenerator):
     def __init__(self, *args, **kwargs):
@@ -20,15 +23,16 @@ class WorldGenerator(ObjectGenerator):
         Always use the same language as the user!
         Don't add any information that is not in the conversation.
         """
+        logger.debug("WorldGenerator initialized successfully")
 
     @property
     def object_field_name(self):
         return "world"
-    
+
     @property
     def entity_class(self):
         return World
-    
+
     @property
     def object_class(self):
         return WorldObject

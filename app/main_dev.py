@@ -1,8 +1,8 @@
+import dotenv
+
 from app.agents.character_gen import CharacterGenerator
 from app.agents.world_gen import WorldGenerator
 
-import dotenv
-from langgraph.store.memory import InMemoryStore
 dotenv.load_dotenv()
 
 # Namespace is now constructed dynamically from user_id in config

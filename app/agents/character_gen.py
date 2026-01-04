@@ -1,8 +1,11 @@
-from app.state.schemas import GenerateCharacterState, Character, CharacterObject
-from app.agents.object_gen import ObjectGenerator
 import dotenv
 
+from app.agents.object_gen import ObjectGenerator
+from app.state.schemas import Character, CharacterObject
+from app.utils import logger
+
 dotenv.load_dotenv()
+
 
 class CharacterGenerator(ObjectGenerator):
     def __init__(self, *args, **kwargs):
@@ -21,15 +24,15 @@ class CharacterGenerator(ObjectGenerator):
         Don't add any information that is not in the conversation.
         Pay attention to both human and bot messages.
         """
+        logger.debug("CharacterGenerator initialized successfully")
 
     @property
     def object_field_name(self):
         return "character"
-        
+
     @property
     def entity_class(self):
         return Character
-    
 
     @property
     def object_class(self):
