@@ -4,77 +4,46 @@ import asyncio
 import dotenv
 from langgraph.store.memory import InMemoryStore
 
-from app.agents.character_gen import CharacterGenerator
-from app.state.schemas import CharacterObject
+from app.graph import Storyteller
 
 
-def setup_character_generator(
-    user_id: str, memory_store: InMemoryStore
-) -> tuple[CharacterGenerator, dict]:
+async def process_single_message(storyteller: Storyteller, message: str, user_id: str) -> None:
     """
-    Set up the character generator and configuration.
+    Process a single message through the storyteller and display the response.
 
     Args:
-        user_id: The user ID for the session
-        memory_store: The memory store instance
-
-    Returns:
-        Tuple of (character_generator, config)
-    """
-    config = {"configurable": {"thread_id": user_id, "user_id": user_id}}
-    character_generator = CharacterGenerator(memory_store=memory_store)
-    return character_generator, config
-
-
-async def process_single_message(
-    character_generator: CharacterGenerator, message: str, config: dict
-) -> str:
-    """
-    Process a single message through the character generator and display the response.
-
-    Args:
-        character_generator: The character generator instance
+        storyteller: The storyteller instance
         message: The message to process
-        config: Configuration dictionary
-
-    Returns:
-        The status after processing ("created" or "in_progress")
     """
     try:
-        result = await character_generator.send_feedback(message, config)
-        last_message = None
-        status = "in_progress"
-        async for event in result:
-            # Check status from the event state
-            if event.get("status"):
-                status = event["status"]
-            if len(event.get("messages", [])) > 0:
-                last_message = event["messages"][-1]
+        result = await storyteller.arun(message, user_id)
+        messages = result.get("messages", [])
+        last_message = messages[-1] if messages else None
 
         if last_message:
             print("\n--- Model Response ---")
-            last_message.pretty_print()
+            if hasattr(last_message, "pretty_print"):
+                last_message.pretty_print()
+            else:
+                print(getattr(last_message, "content", last_message))
             print("--- End Response ---\n")
         else:
             print("No response received for message.")
-
-        return status
     except Exception as e:
         print(f"Error processing message '{message}': {e}")
         raise
 
 
-async def interactive_conversation(character_generator: CharacterGenerator, config: dict) -> None:
+async def interactive_conversation(storyteller: Storyteller, user_id: str) -> None:
     """
-    Run an interactive conversation loop with the character generator.
+    Run an interactive conversation loop with the storyteller.
 
     Args:
-        character_generator: The character generator instance
-        config: Configuration dictionary
+        storyteller: The storyteller instance
     """
-    print("\n=== Interactive Character Generation ===")
-    print("Enter your messages to refine the character.")
-    print("Type 'exit', 'quit', or 'done' to finish and view the final character.\n")
+    print("\n=== Interactive Storyteller ===")
+    print("Enter your messages to build the story.")
+    print("Type 'exit', 'quit', or 'done' to finish.\n")
 
     while True:
         try:
@@ -88,13 +57,8 @@ async def interactive_conversation(character_generator: CharacterGenerator, conf
                 print("\nFinishing conversation...")
                 break
 
-            # Process the message and check status
-            status = await process_single_message(character_generator, user_input, config)
-
-            # Check if character generation is complete
-            if status == "created":
-                print("\nCharacter generation is complete!")
-                break
+            # Process the message through the storyteller
+            await process_single_message(storyteller, user_input, user_id)
 
         except KeyboardInterrupt:
             print("\n\nInterrupted by user. Finishing conversation...")
@@ -107,31 +71,9 @@ async def interactive_conversation(character_generator: CharacterGenerator, conf
             print("Continuing...")
 
 
-def retrieve_character(memory_store: InMemoryStore, user_id: str, char_id: str) -> CharacterObject:
-    """
-    Retrieve a character from the memory store.
-
-    Args:
-        memory_store: The memory store instance
-        user_id: The user ID
-        char_id: The character ID
-
-    Returns:
-        The CharacterObject
-
-    Raises:
-        ValueError: If character is not found
-    """
-    namespace = (user_id, "memories")
-    character = memory_store.get(namespace, char_id)
-    if character is None:
-        raise ValueError(f"Character with ID {char_id} not found in memory store")
-    return character
-
-
 async def main(user_id: str = "1") -> None:
     """
-    Main orchestration function for interactive character generation.
+    Main orchestration function for interactive storytelling.
 
     Args:
         user_id: The user ID for the session
@@ -140,25 +82,10 @@ async def main(user_id: str = "1") -> None:
 
     try:
         # Setup
-        character_generator, config = setup_character_generator(user_id, in_memory_store)
-
-        # Initialize the character and get its ID
-        try:
-            char_id = await character_generator.initialize_object(config)
-            print(f"Character initialized with ID: {char_id}\n")
-        except Exception as e:
-            print(f"Error initializing character: {e}")
-            raise
+        storyteller = Storyteller(memory_store=in_memory_store)
 
         # Run interactive conversation
-        await interactive_conversation(character_generator, config)
-
-        # Retrieve and display final character
-        character = retrieve_character(in_memory_store, user_id, char_id)
-        print("\n" + "=" * 50)
-        print("Final Character:")
-        print("=" * 50)
-        print(character)
+        await interactive_conversation(storyteller, user_id)
 
     except Exception as e:
         print(f"Error in main execution: {e}")

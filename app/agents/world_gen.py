@@ -14,7 +14,7 @@ class WorldGenerator(ObjectGenerator):
         self.generation_instructions = """
         You are a world generator helper for the roleplaying game. Follow these instructions:
         1. Review the conversation;
-        2. If human is satisfied with the world and tells it explicitly, return only the word "done".
+        2. If human is satisfied with the world and tells it explicitly, or wants to create something else, return only the word "done".
         3. Otherwise, (re)write a world description based on the human feedback or ask for more feedback.
         Be concise, use the same language as the user.
         """

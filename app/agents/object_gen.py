@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 import time
 from abc import abstractmethod
@@ -86,7 +87,7 @@ class ObjectGenerator:
         Extract the object from the conversation.
         """
         store = store or self.memory_store
-        logger.debug(f"Extracting object with store: {store}")
+        logger.debug(f"Extracting object {state.get('user_id', 'default')} from description")
         messages = state.get("messages", [])
         # Trim messages to avoid token limits and potential serialization issues
         trimmed_messages = self.trim_messages(messages)
@@ -129,6 +130,7 @@ class ObjectGenerator:
 
     async def human_feedback(self, state: State, store: BaseStore = None):
         """No-op node that should be interrupted on"""
+        logger.debug("Waiting for human feedback")
         feedback = interrupt("Please provide feedback on the object.")
         return {"messages": [HumanMessage(content=feedback)]}
 
@@ -226,7 +228,7 @@ class ObjectGenerator:
         Initialize the object and return its ID.
         Invokes the graph to run initialize_object_node which creates the object with an ID.
         """
-        logger.debug("Initializing new object")
+        logger.debug(f"Initializing new {self.object_class.__name__}")
         store = store or self.memory_store
         # Extract user_id from config if provided, otherwise use thread_id as user_id
         configurable = config.get("configurable", {})
@@ -351,12 +353,19 @@ class ObjectGeneratorTool(StructuredTool):
                         return summary
                 return f"{self._generator.object_class.__name__} generated successfully. Object ID: {object_id}"
             else:
-                # Graph interrupted - return status indicating feedback is needed
-                # External code should call generator.send_feedback(feedback, config) to continue
-                return f"""{self._generator.object_class.__name__} generation in progress.
-                Object ID: {object_id}.
-                The graph is waiting for feedback.
-                Call generator.send_feedback(feedback, config) to continue."""
+                # Interrupted: return a structured payload so Storyteller can resume.
+                payload = {
+                    "status": "in_progress",
+                    "tool_name": self.name,
+                    "object_id": object_id,
+                    "user_id": user_id,
+                    "thread_id": thread_id,
+                    "message": (
+                        f"{self._generator.object_class.__name__} generation in progress. "
+                        f"Object ID: {object_id}. The graph is waiting for feedback."
+                    ),
+                }
+                return json.dumps(payload)
 
         except Exception as e:
             logger.error(f"Error generating {self._generator.object_class.__name__}: {e}")
