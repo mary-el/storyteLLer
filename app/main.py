@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import json
 
 import dotenv
 from langgraph.store.memory import InMemoryStore
@@ -7,7 +8,13 @@ from langgraph.store.memory import InMemoryStore
 from app.graph import Storyteller
 
 
-async def process_single_message(storyteller: Storyteller, message: str, user_id: str) -> None:
+def _print_message(message: str) -> None:
+    print("\n--- Model Response ---")
+    print(message)
+    print("--- End Response ---\n")
+
+
+async def process_single_message(storyteller: Storyteller, message: str, user_id: str) -> bool:
     """
     Process a single message through the storyteller and display the response.
 
@@ -16,19 +23,18 @@ async def process_single_message(storyteller: Storyteller, message: str, user_id
         message: The message to process
     """
     try:
-        result = await storyteller.arun(message, user_id)
-        messages = result.get("messages", [])
-        last_message = messages[-1] if messages else None
+        response_text = await storyteller.tell(message, user_id)
 
-        if last_message:
-            print("\n--- Model Response ---")
-            if hasattr(last_message, "pretty_print"):
-                last_message.pretty_print()
-            else:
-                print(getattr(last_message, "content", last_message))
-            print("--- End Response ---\n")
+        try:
+            response_json = json.loads(response_text)
+            message = response_json.get("response", "")
+        except json.JSONDecodeError:
+            message = response_text
+        if message:
+            _print_message(message)
         else:
             print("No response received for message.")
+        return True
     except Exception as e:
         print(f"Error processing message '{message}': {e}")
         raise
@@ -58,7 +64,9 @@ async def interactive_conversation(storyteller: Storyteller, user_id: str) -> No
                 break
 
             # Process the message through the storyteller
-            await process_single_message(storyteller, user_input, user_id)
+            should_continue = await process_single_message(storyteller, user_input, user_id)
+            if not should_continue:
+                break
 
         except KeyboardInterrupt:
             print("\n\nInterrupted by user. Finishing conversation...")
@@ -80,16 +88,11 @@ async def main(user_id: str = "1") -> None:
     """
     in_memory_store = InMemoryStore()
 
-    try:
-        # Setup
-        storyteller = Storyteller(memory_store=in_memory_store)
+    # Setup
+    storyteller = Storyteller(memory_store=in_memory_store)
 
-        # Run interactive conversation
-        await interactive_conversation(storyteller, user_id)
-
-    except Exception as e:
-        print(f"Error in main execution: {e}")
-        raise
+    # Run interactive conversation
+    await interactive_conversation(storyteller, user_id)
 
 
 def cli():

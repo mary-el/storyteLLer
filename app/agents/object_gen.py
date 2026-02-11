@@ -1,20 +1,15 @@
-import asyncio
-import json
-import threading
 import time
 from abc import abstractmethod
 from typing import Optional
 
 import dotenv
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, trim_messages
-from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
-from langgraph.types import Command, interrupt
-from pydantic import BaseModel, Field, PrivateAttr
+from langgraph.types import interrupt
 from trustcall import create_extractor
 
 from app.state.schemas import State
@@ -46,7 +41,6 @@ class ObjectGenerator:
         # Create extractor using the object class
         self.trustcall_extractor = self._create_extractor()
         self.graph = self.build_graph()
-        self.tool = ObjectGeneratorTool(self)
 
     def _create_extractor(self):
         """Create the trustcall extractor using the object class"""
@@ -80,6 +74,7 @@ class ObjectGenerator:
         namespace = (state.get("user_id", "default"), "memories")
         if store:
             store.put(namespace, obj.object_id, obj)
+        logger.debug(f"Object initialized: {obj}")
         return {"generated_object": obj}
 
     async def extract(self, state: State, store: BaseStore = None):
@@ -129,9 +124,19 @@ class ObjectGenerator:
             return {}
 
     async def human_feedback(self, state: State, store: BaseStore = None):
-        """No-op node that should be interrupted on"""
-        logger.debug("Waiting for human feedback")
-        feedback = interrupt("Please provide feedback on the object.")
+        """Node that interrupts to request human feedback, returns feedback on resume"""
+        logger.debug("Requesting human feedback via interrupt()")
+        # interrupt() will pause execution and wait for Command(resume=...)
+        # On resume, it returns the value passed to Command(resume=value)
+        messages = state.get("messages", [])
+        last_message = messages[-1] if messages else None
+        interrupt_value = last_message.content if last_message else "Waiting for feedback..."
+
+        # Call interrupt() - this will pause on first call, return feedback value on resume
+        feedback = interrupt(interrupt_value)
+        logger.info(f"Received feedback from interrupt: {feedback}")
+
+        # Add feedback as HumanMessage to continue the conversation
         return {"messages": [HumanMessage(content=feedback)]}
 
     def should_extract(self, state: State, store: BaseStore = None):
@@ -163,10 +168,13 @@ class ObjectGenerator:
         messages = self.trim_messages(state.get("messages", []))
         self.current_message_count += 1
         start_time = time.time()
+        logger.debug(
+            f"Generating description: {messages + [SystemMessage(content=self.generation_instructions)]}"
+        )
         answer = await self.llm.ainvoke(
             messages + [SystemMessage(content=self.generation_instructions)]
         )
-        logger.debug(f"Generated description: {answer}")
+        logger.debug(f"Generated description: {answer.content}")
         end_time = time.time()
         logger.debug(f"Time taken: {end_time - start_time} seconds")
         if answer.content.lower().strip() == "done":
@@ -195,223 +203,16 @@ class ObjectGenerator:
         builder.add_node("generate_description", self.generate_description)
         builder.add_node("extract", self.extract)
 
-        builder.add_edge("initialize_object", "human_feedback")
+        # Start generation immediately after initialization to avoid early interrupts
+        builder.add_edge("initialize_object", "generate_description")
         builder.add_edge("human_feedback", "generate_description")
         # Route to extract and human_feedback in parallel when extraction is needed
         builder.add_conditional_edges(
             "generate_description", self.should_extract, ["extract", "human_feedback"]
         )
         builder.add_conditional_edges("extract", self.should_continue, ["human_feedback", END])
-        # Compile with checkpoint saver to enable run tracking
-        interrupt_before = ["human_feedback"] if self.langdev else []
-        self.graph = builder.compile(
-            checkpointer=self.checkpointer, interrupt_before=interrupt_before
-        )
+        # Compile with checkpoint saver
+        # NodeInterrupt in human_feedback will propagate to parent graph automatically
+        self.graph = builder.compile(checkpointer=self.checkpointer)
         logger.debug("Graph built successfully")
         return self.graph
-
-    async def run(self, input: str, config: dict):
-        """Run the graph"""
-        logger.debug("Running graph for ObjectGenerator")
-        # Extract user_id from config if provided, otherwise use default as user_id
-        configurable = config.get("configurable", {})
-        user_id = configurable.get("user_id", "default")
-        initial_state = {"messages": [HumanMessage(content=input)]}
-        initial_state["user_id"] = user_id
-        return await self.graph.astream(initial_state, config, stream_mode="values")
-
-    async def send_feedback(self, input: str, config: dict):
-        return self.graph.astream(Command(resume=(input)), config, stream_mode="values")
-
-    async def initialize_object(self, config: dict, store: BaseStore = None) -> str:
-        """
-        Initialize the object and return its ID.
-        Invokes the graph to run initialize_object_node which creates the object with an ID.
-        """
-        logger.debug(f"Initializing new {self.object_class.__name__}")
-        store = store or self.memory_store
-        # Extract user_id from config if provided, otherwise use thread_id as user_id
-        configurable = config.get("configurable", {})
-        user_id = configurable.get("user_id", "default")
-
-        # Use stream to get state after initialization node runs
-        # The graph will run: initialize_object -> human_feedback (interrupts)
-        state_updates = await self.graph.ainvoke({"messages": [], "user_id": user_id}, config)
-        # Get the object from the initial state (created by initialize_object_node)
-        object_data = state_updates.get("generated_object")
-        logger.debug(f"Object data: {object_data}")
-        if object_data:
-            object_id = (
-                object_data.get("object_id")
-                if isinstance(object_data, dict)
-                else object_data.object_id
-            )
-            logger.debug(f"Object ID: {object_id}")
-            return object_id
-        else:
-            raise ValueError(
-                f"{self.object_class.__name__} not found in state after initialization"
-            )
-
-
-class ObjectGeneratorTool(StructuredTool):
-    """
-    A StructuredTool subclass that wraps an ObjectGenerator's async feedback loop.
-    This tool handles the full generation process including interruptions for user feedback.
-    """
-
-    _generator: "ObjectGenerator" = PrivateAttr()
-
-    def __init__(self, generator: "ObjectGenerator"):
-        """
-        Initialize the tool with an ObjectGenerator instance.
-
-        Args:
-            generator: The ObjectGenerator instance to use for object generation
-        """
-
-        # Create input schema for the tool
-        class ToolInput(BaseModel):
-            description: Optional[str] = Field(
-                default="",
-                description=f"Initial description or prompt for generating the {generator.object_field_name} (optional).",
-            )
-            user_id: Optional[str] = Field(
-                default=None,
-                description="User ID for the session (optional, defaults to 'default')",
-            )
-            thread_id: Optional[str] = Field(
-                default=None,
-                description="Thread ID for checkpointing (optional, defaults to user_id)",
-            )
-
-        tool_name = f"generate_{generator.object_field_name}"
-        tool_description = f"""
-        Generate a {generator.object_field_name} based on a description.
-        This tool will interactively refine the {generator.object_field_name}
-        based on feedback until it's complete. When interrupted,
-         the tool will pause and wait for feedback to be provided
-         through the Storyteller.
-        """
-
-        super().__init__(
-            name=tool_name,
-            description=tool_description,
-            args_schema=ToolInput,
-        )
-
-        self._generator = generator
-
-    async def _run_async(
-        self,
-        description: Optional[str] = None,
-        user_id: Optional[str] = None,
-        thread_id: Optional[str] = None,
-    ) -> str:
-        """
-        Async function that runs the generator graph with initial description.
-        When the graph interrupts (at human_feedback node), it returns early.
-        External code should call generator.send_feedback() to continue.
-        """
-        # Set up config
-        if user_id is None:
-            user_id = "default"
-        if thread_id is None:
-            thread_id = user_id
-
-        if description is None:
-            description = ""
-
-        config = {"configurable": {"thread_id": thread_id, "user_id": user_id}}
-
-        try:
-            # Initialize the object
-            object_id = await self._generator.initialize_object(config)
-            logger.debug(
-                f"Initialized {self._generator.object_class.__name__} with ID: {object_id}"
-            )
-
-            # Process the stream until interruption or completion
-            status = "in_progress"
-
-            # Check if generation is complete
-            if status == "created":
-                # Retrieve the final object if generation is complete
-                if self._generator.memory_store:
-                    namespace = (user_id, "memories")
-                    final_object = self._generator.memory_store.get(namespace, object_id)
-                    if final_object:
-                        # Get the entity (character or world) from the object
-                        entity = getattr(final_object, self._generator.object_field_name)
-                        entity_name = (
-                            getattr(entity, "name", "Unnamed")
-                            if hasattr(entity, "name")
-                            else "Unnamed"
-                        )
-                        summary = f"""{self._generator.entity_class.__name__} '{entity_name}'
-                        generated successfully. Object ID: {object_id}"""
-                        return summary
-                return f"{self._generator.object_class.__name__} generated successfully. Object ID: {object_id}"
-            else:
-                # Interrupted: return a structured payload so Storyteller can resume.
-                payload = {
-                    "status": "in_progress",
-                    "tool_name": self.name,
-                    "object_id": object_id,
-                    "user_id": user_id,
-                    "thread_id": thread_id,
-                    "message": (
-                        f"{self._generator.object_class.__name__} generation in progress. "
-                        f"Object ID: {object_id}. The graph is waiting for feedback."
-                    ),
-                }
-                return json.dumps(payload)
-
-        except Exception as e:
-            logger.error(f"Error generating {self._generator.object_class.__name__}: {e}")
-            return f"Error generating {self._generator.object_class.__name__}: {str(e)}"
-
-    def _run(
-        self,
-        description: Optional[str] = None,
-        user_id: Optional[str] = None,
-        thread_id: Optional[str] = None,
-    ) -> str:
-        """
-        Synchronous entry point for the tool that wraps the async execution.
-        Uses asyncio.run() or a new thread with event loop to execute the async function.
-        """
-        try:
-            # Check if there's already an event loop running
-            try:
-                # If we're in an async context, we need to handle it differently
-                # For LangGraph tools, we can use create_task or run in executor
-                result = None
-                exception = None
-
-                def run_in_thread():
-                    nonlocal result, exception
-                    try:
-                        # Create a new event loop for this thread
-                        new_loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(new_loop)
-                        result = new_loop.run_until_complete(
-                            self._run_async(description, user_id, thread_id)
-                        )
-                        new_loop.close()
-                    except Exception as e:
-                        exception = e
-
-                thread = threading.Thread(target=run_in_thread)
-                thread.start()
-                thread.join()
-
-                if exception:
-                    raise exception
-                return result
-            except RuntimeError:
-                # No running loop, we can use asyncio.run
-                return asyncio.run(self._run_async(description, user_id, thread_id))
-        except Exception as e:
-            logger.error(f"Error in sync wrapper: {e}")
-            return f"Error: {str(e)}"

@@ -43,14 +43,12 @@ class WorldObject(BaseObject):
 
 
 class State(MessagesState):
+    """State for ObjectGenerator subgraphs and Storyteller graph"""
+
     status: NotRequired[Literal["created", "in_progress"]]
     user_id: NotRequired[str]
     generated_object: NotRequired[BaseObject]
 
 
-class GenerateCharacterState(State):
-    pass
-
-
-class GenerateWorldState(State):
-    pass
+class StorytellerState(State):
+    """State for Storyteller graph - inherits all fields from State for subgraph compatibility"""

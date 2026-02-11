@@ -1,20 +1,31 @@
 import json
-from typing import Optional
+from typing import Literal, Optional
 
 import dotenv
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, trim_messages
+from langchain_core.messages import AIMessage, HumanMessage, trim_messages
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import END, START, MessagesState, StateGraph
-from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.graph import END, START, StateGraph
 from langgraph.store.memory import InMemoryStore
+from langgraph.types import Command
+from pydantic import BaseModel, Field
 
 from app.agents.character_gen import CharacterGenerator
 from app.agents.world_gen import WorldGenerator
+from app.state.schemas import StorytellerState
 from app.utils import logger
 
 dotenv.load_dotenv()
+
+
+class DialogueResponse(BaseModel):
+    """Structured response from dialogue node"""
+
+    node: Literal["generate_character", "generate_world", "dialogue"] = Field(
+        description="Next node to route to"
+    )
+    response: str = Field(description="Response message if node is 'dialogue'")
 
 
 class Storyteller:
@@ -22,25 +33,26 @@ class Storyteller:
         self.llm = ChatOpenAI(
             model="rag-runtime", base_url="http://127.0.0.1:19000/v1", temperature=0.3
         )
-        self.instruction = """You are the Storyteller - a helpful assistant that helps the user create a story.
-        You can use tools to generate the world and the characters for the story.
-        Invite the user to create a story by providing a prompt.
-        """
         self.checkpointer = MemorySaver() if not langdev else None
         self.memory_store = memory_store
         self.langdev = langdev
-        self.generators = [
-            WorldGenerator(self.llm, self.checkpointer, memory_store, langdev=langdev),
-            CharacterGenerator(self.llm, self.checkpointer, memory_store, langdev=langdev),
-        ]
-        self.tools = [generator.tool for generator in self.generators]
-        self.prompt = f"""
+        # Pass shared checkpointer to subgraphs for proper Command handling
+        self.character_generator = CharacterGenerator(
+            self.llm, self.checkpointer, memory_store, langdev=langdev
+        )
+        self.world_generator = WorldGenerator(
+            self.llm, self.checkpointer, memory_store, langdev=langdev
+        )
+        # Instance variable to pass generator_prompt between nodes
+        self.prompt = """
         You are the Storyteller - a helpful assistant that helps the user create a story.
-        You can use tools to generate the world and the characters for the story.
-        Invite the user to create a story by providing a prompt.
-        You can use tools to generate this objects:
-        {", ".join([generator.entity_class.__name__ for generator in self.generators])}
-        Use them as soon as the user mentions the object with the users's prompt.
+        You can generate the world and the characters for the story.
+        Respond with JSON containing:
+        - "node": "generate_character", "generate_world", or "dialogue"
+        - "response": if node is dialogue, provide your response message
+
+        As soon as user mentions creation of a character or world, set node to "generate_character" or "generate_world" and provide a prompt.
+        Otherwise, set node to "dialogue" and provide your response message.
         """
         self.template = ChatPromptTemplate(
             [
@@ -48,62 +60,31 @@ class Storyteller:
                 ("system", self.prompt),
             ]
         )
-        self.llm_with_tools = self.llm.bind_tools(self.tools)
         self.max_len = 1000
         self.graph = self.build_graph()
-        # Track pending tool runs per user and map tool name -> generator.
-        self.pending_tool_by_user: dict[str, dict] = {}
-        self.tool_map = {generator.tool.name: generator for generator in self.generators}
+        self.waiting_for_feedback = False
 
-    def _extract_pending_payload(self, messages: list[BaseMessage]) -> Optional[dict]:
-        """Parse tool JSON payloads and return the latest pending state."""
-        payload = None
-        for message in messages:
-            content = getattr(message, "content", None)
-            if not isinstance(content, str):
-                continue
-            try:
-                data = json.loads(content)
-            except json.JSONDecodeError:
-                continue
-            if data.get("status") == "in_progress" and data.get("tool_name"):
-                payload = data
-        return payload
+    def route_generator(
+        self, state: StorytellerState
+    ) -> Literal["generate_character", "generate_world", "dialogue"]:
+        """Route to appropriate generator based on structured response."""
+        messages = state.get("messages", [])
+        if not messages:
+            return "dialogue"
 
-    async def _resume_tool(self, user_id: str, feedback: str) -> dict:
-        """Resume a pending tool run using the human feedback."""
-        pending = self.pending_tool_by_user.get(user_id)
-        if not pending:
-            return {}
-        tool_name = pending.get("tool_name")
-        generator = self.tool_map.get(tool_name)
-        if not generator:
-            logger.warning(f"Pending tool '{tool_name}' not found. Dropping pending state.")
-            self.pending_tool_by_user.pop(user_id, None)
-            return {}
+        last_message = messages[-1]
+        content = getattr(last_message, "content", "")
 
-        thread_id = pending.get("thread_id") or user_id
-        # Use configurable IDs so checkpoints align with the tool run.
-        config = {"configurable": {"thread_id": thread_id, "user_id": user_id}}
+        try:
+            data = json.loads(content)
+            node = data.get("node", "dialogue")
+            return node
+        except (json.JSONDecodeError, AttributeError):
+            # Fallback to dialogue if JSON parsing fails
+            logger.warning(f"Failed to parse JSON: {content}")
+            return "dialogue"
 
-        result_stream = await generator.send_feedback(feedback, config)
-        last_message = None
-        status = "in_progress"
-
-        async for event in result_stream:
-            if event.get("status"):
-                status = event["status"]
-            if len(event.get("messages", [])) > 0:
-                last_message = event["messages"][-1]
-
-        if status == "created":
-            self.pending_tool_by_user.pop(user_id, None)
-
-        if last_message:
-            return {"messages": [last_message], "status": status}
-        return {"messages": [], "status": status}
-
-    async def dialogue(self, state: MessagesState) -> MessagesState:
+    async def dialogue(self, state: StorytellerState) -> StorytellerState:
         """Dialogue node for the storyteller"""
         messages = trim_messages(
             state["messages"],
@@ -113,42 +94,88 @@ class Storyteller:
             start_on="human",
             include_system=False,
         )
+        logger.debug("routing to dialogue")
         prompt = self.template.invoke({"conversation": messages})
-        response = await self.llm_with_tools.ainvoke(prompt)
-        return {"messages": [response]}
+        llm_with_structure = self.llm.with_structured_output(DialogueResponse)
+        response = await llm_with_structure.ainvoke(prompt)
+        # Return JSON string as message content with ensure_ascii=False to preserve Unicode
+        json_content = json.dumps(
+            {"node": response.node, "response": response.response}, ensure_ascii=False
+        )
+        return {"messages": [AIMessage(content=json_content)]}
+
+    def finalize_object(self, state: StorytellerState) -> StorytellerState:
+        """Finalize object generation and extract object_id"""
+        logger.debug("Finalizing object generation")
+        generated_object = state.get("generated_object")
+        if generated_object:
+            message = f"Generated object: {generated_object.model_dump_json()}"
+            return {
+                "messages": [AIMessage(content=message)],
+                "status": None,
+                "generated_object": None,
+            }
 
     def build_graph(self):
-        """Build the graph for the storyteller"""
-        graph = StateGraph(MessagesState)
+        """Build the graph for the storyteller with integrated subgraphs"""
+        graph = StateGraph(StorytellerState)
+
+        # Add dialogue node
         graph.add_node("dialogue", self.dialogue)
-        tools_node = ToolNode(self.tools)
-        graph.add_node("tools", tools_node)
+
+        # Add subgraphs directly as nodes - LangGraph will handle Command propagation
+        graph.add_node("generate_character", self.character_generator.graph)
+        graph.add_node("generate_world", self.world_generator.graph)
+
+        # Add finalize nodes
+        graph.add_node("finalize_object", self.finalize_object)
+
+        # Start with dialogue
         graph.add_edge(START, "dialogue")
-        graph.add_conditional_edges("dialogue", tools_condition, {"tools": "tools", END: END})
-        graph.add_edge("tools", "dialogue")
+
+        # Route from dialogue to prepare nodes or end
+        graph.add_conditional_edges(
+            "dialogue",
+            self.route_generator,
+            {
+                "generate_character": "generate_character",
+                "generate_world": "generate_world",
+                "dialogue": END,
+            },
+        )
+        # Connect subgraphs to finalize nodes
+        graph.add_edge("generate_character", "finalize_object")
+        graph.add_edge("generate_world", "finalize_object")
+
+        # Connect finalize nodes back to dialogue
+        graph.add_edge("finalize_object", END)
+
         return graph.compile(checkpointer=self.checkpointer)
 
-    async def arun(self, query: str, user_id: str) -> str:
+    async def arun(self, query: str | Command, user_id: str, thread_id: str = None) -> dict:
         """Run the storyteller asynchronously"""
-        # If a tool is waiting, resume it directly with the new feedback.
-        pending = self.pending_tool_by_user.get(user_id)
-        if pending:
-            logger.debug(f"Resuming tool {pending.get('tool_name')} for user {user_id}")
-            resumed = await self._resume_tool(user_id, query)
-            if resumed:
-                return resumed
-
-        state = MessagesState(messages=[HumanMessage(content=query)])
-        logger.info(state)
-        # Always pass configurable IDs to the storyteller graph.
-        config = {"configurable": {"user_id": user_id, "thread_id": user_id}}
-        result = await self.graph.ainvoke(state, config)
-
-        pending_payload = self._extract_pending_payload(result.get("messages", []))
-        if pending_payload:
-            self.pending_tool_by_user[user_id] = pending_payload
-            message = pending_payload.get("message", "")
-            logger.debug(f"Pending tool {pending_payload.get('tool_name')} for user {user_id}")
-            return {"messages": [AIMessage(content=message)], "status": "in_progress"}
-
+        if isinstance(query, Command):
+            input_data = query
+        else:
+            input_data = {"messages": [HumanMessage(content=query)], "user_id": user_id}
+        config = {"configurable": {"user_id": user_id, "thread_id": thread_id or user_id}}
+        result = await self.graph.ainvoke(input_data, config)
         return result
+
+    async def tell(self, query: str, user_id: str, thread_id: str = None) -> str:
+        if not self.waiting_for_feedback:
+            result = await self.arun(query, user_id, thread_id)
+        else:
+            logger.info(f"Sending command: {query}")
+            result = await self.arun(Command(resume=query), user_id, thread_id)
+        logger.debug(f"Result: {result}")
+        interrupts = result.get("__interrupt__")
+        self.waiting_for_feedback = interrupts is not None
+        if interrupts:
+            if isinstance(interrupts, list) and interrupts:
+                first = interrupts[0]
+                return first.value if hasattr(first, "value") else str(first)
+            return str(interrupts)
+        messages = result.get("messages", [])
+        last_message = messages[-1] if messages else None
+        return getattr(last_message, "content", "") if last_message else ""
