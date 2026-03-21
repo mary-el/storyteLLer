@@ -2,7 +2,7 @@ import json
 from typing import Literal, Optional
 
 import dotenv
-from langchain_core.messages import AIMessage, HumanMessage, trim_messages
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, trim_messages
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
@@ -51,6 +51,10 @@ class Storyteller:
         - "node": "generate_character", "generate_world", or "dialogue"
         - "response": if node is dialogue, provide your response message
 
+        If the most recent conversation message is a system event
+        "SYSTEM_EVENT: OBJECT_CREATED", acknowledge that the object was created
+        and ask the user for next instructions.
+
         As soon as user mentions creation of a character or world, set node to "generate_character" or "generate_world" and provide a prompt.
         Otherwise, set node to "dialogue" and provide your response message.
         """
@@ -92,7 +96,7 @@ class Storyteller:
             token_counter=len,
             strategy="last",
             start_on="human",
-            include_system=False,
+            include_system=True,
         )
         logger.debug("routing to dialogue")
         prompt = self.template.invoke({"conversation": messages})
@@ -102,19 +106,22 @@ class Storyteller:
         json_content = json.dumps(
             {"node": response.node, "response": response.response}, ensure_ascii=False
         )
-        return {"messages": [AIMessage(content=json_content)]}
+        return {"messages": [AIMessage(content=json_content)], "status": None}
 
     def finalize_object(self, state: StorytellerState) -> StorytellerState:
         """Finalize object generation and extract object_id"""
         logger.debug("Finalizing object generation")
         generated_object = state.get("generated_object")
         if generated_object:
-            message = f"Generated object: {generated_object.model_dump_json()}"
             return {
-                "messages": [AIMessage(content=message)],
-                "status": None,
+                "messages": [
+                    SystemMessage(
+                        content=f"SYSTEM_EVENT: OBJECT_CREATED: {generated_object.model_dump_json()}"
+                    )
+                ],
                 "generated_object": None,
             }
+        return {}
 
     def build_graph(self):
         """Build the graph for the storyteller with integrated subgraphs"""
@@ -147,8 +154,8 @@ class Storyteller:
         graph.add_edge("generate_character", "finalize_object")
         graph.add_edge("generate_world", "finalize_object")
 
-        # Connect finalize nodes back to dialogue
-        graph.add_edge("finalize_object", END)
+        # Return to dialogue after object is finalized
+        graph.add_edge("finalize_object", "dialogue")
 
         return graph.compile(checkpointer=self.checkpointer)
 
@@ -168,7 +175,6 @@ class Storyteller:
         else:
             logger.info(f"Sending command: {query}")
             result = await self.arun(Command(resume=query), user_id, thread_id)
-        logger.debug(f"Result: {result}")
         interrupts = result.get("__interrupt__")
         self.waiting_for_feedback = interrupts is not None
         if interrupts:

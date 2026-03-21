@@ -19,9 +19,10 @@ class WorldGenerator(ObjectGenerator):
         Be concise, use the same language as the user.
         """
 
-        self.extraction_instructions = """Extract the world object from the following conversation.
+        self.extraction_instructions = """Update existing world from the following conversation.
         Always use the same language as the user!
         Don't add any information that is not in the conversation.
+        Pay attention to both human and bot messages.
         """
         logger.debug("WorldGenerator initialized successfully")
 
