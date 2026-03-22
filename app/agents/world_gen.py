@@ -1,6 +1,7 @@
 import dotenv
 
 from app.agents.object_gen import ObjectGenerator
+from app.config.schema import AppConfig, ObjectAgentConfig
 from app.state.schemas import World, WorldObject
 from app.utils import logger
 
@@ -8,22 +9,12 @@ dotenv.load_dotenv()
 
 
 class WorldGenerator(ObjectGenerator):
+    @classmethod
+    def _agent_prompts(cls, app_config: AppConfig) -> ObjectAgentConfig:
+        return app_config.agents.world
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-
-        self.generation_instructions = """
-        You are a world generator helper for the roleplaying game. Follow these instructions:
-        1. Review the conversation;
-        2. If human is satisfied with the world and tells it explicitly, or wants to create something else, return only the word "done".
-        3. Otherwise, (re)write a world description based on the human feedback or ask for more feedback.
-        Be concise, use the same language as the user.
-        """
-
-        self.extraction_instructions = """Update existing world from the following conversation.
-        Always use the same language as the user!
-        Don't add any information that is not in the conversation.
-        Pay attention to both human and bot messages.
-        """
         logger.debug("WorldGenerator initialized successfully")
 
     @property

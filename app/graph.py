@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.agents.character_gen import CharacterGenerator
 from app.agents.world_gen import WorldGenerator
+from app.config import AppConfig, load_app_config
 from app.state.schemas import StorytellerState
 from app.utils import logger
 
@@ -29,42 +30,42 @@ class DialogueResponse(BaseModel):
 
 
 class Storyteller:
-    def __init__(self, langdev: bool = False, memory_store: Optional[InMemoryStore] = None) -> None:
+    def __init__(
+        self,
+        langdev: bool = False,
+        memory_store: Optional[InMemoryStore] = None,
+        config: Optional[AppConfig] = None,
+    ) -> None:
+        self.config = config or load_app_config()
         self.llm = ChatOpenAI(
-            model="rag-runtime", base_url="http://127.0.0.1:19000/v1", temperature=0.3
+            model=self.config.llm.model,
+            base_url=self.config.llm.base_url,
+            temperature=self.config.llm.temperature,
         )
         self.checkpointer = MemorySaver() if not langdev else None
         self.memory_store = memory_store
         self.langdev = langdev
-        # Pass shared checkpointer to subgraphs for proper Command handling
         self.character_generator = CharacterGenerator(
-            self.llm, self.checkpointer, memory_store, langdev=langdev
+            self.llm,
+            self.checkpointer,
+            memory_store,
+            langdev=langdev,
+            app_config=self.config,
         )
         self.world_generator = WorldGenerator(
-            self.llm, self.checkpointer, memory_store, langdev=langdev
+            self.llm,
+            self.checkpointer,
+            memory_store,
+            langdev=langdev,
+            app_config=self.config,
         )
-        # Instance variable to pass generator_prompt between nodes
-        self.prompt = """
-        You are the Storyteller - a helpful assistant that helps the user create a story.
-        You can generate the world and the characters for the story.
-        Respond with JSON containing:
-        - "node": "generate_character", "generate_world", or "dialogue"
-        - "response": if node is dialogue, provide your response message
-
-        If the most recent conversation message is a system event
-        "SYSTEM_EVENT: OBJECT_CREATED", acknowledge that the object was created
-        and ask the user for next instructions.
-
-        As soon as user mentions creation of a character or world, set node to "generate_character" or "generate_world" and provide a prompt.
-        Otherwise, set node to "dialogue" and provide your response message.
-        """
         self.template = ChatPromptTemplate(
             [
                 MessagesPlaceholder(variable_name="conversation", optional=True),
-                ("system", self.prompt),
+                ("system", self.config.dialogue.system_prompt),
             ]
         )
-        self.max_len = 1000
+        self.max_len = self.config.dialogue.max_trim_tokens
         self.graph = self.build_graph()
         self.waiting_for_feedback = False
 

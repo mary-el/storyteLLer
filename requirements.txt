@@ -1,4 +1,6 @@
-dotenv~=1.0.1
+dotenv
+PyYAML~=6.0.1
+pydantic~=2.10.0
 langgraph~=1.0.4
 langchain~=0.3.25
 trustcall~=0.0.39

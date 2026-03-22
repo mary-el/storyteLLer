@@ -1,5 +1,5 @@
 import time
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from typing import Optional
 
 import dotenv
@@ -12,30 +12,38 @@ from langgraph.store.memory import InMemoryStore
 from langgraph.types import interrupt
 from trustcall import create_extractor
 
+from app.config.schema import AppConfig, ObjectAgentConfig
 from app.state.schemas import State
 from app.utils import logger
 
 dotenv.load_dotenv()
 
-EXTRACT_EVERY_N_MESSAGES = 3
-MAX_MESSAGES = 5
 
+class ObjectGenerator(ABC):
+    @classmethod
+    @abstractmethod
+    def _agent_prompts(cls, app_config: AppConfig) -> ObjectAgentConfig:
+        """Agent-specific prompts from the shared app config."""
 
-class ObjectGenerator:
     def __init__(
         self,
         llm: ChatOpenAI,
         checkpointer: Optional[MemorySaver] = None,
         memory_store: Optional[InMemoryStore] = None,
         langdev: bool = False,
+        *,
+        app_config: AppConfig,
     ):
+        self.app_config = app_config
+        agent = type(self)._agent_prompts(app_config)
+        og = app_config.object_generator
         self.llm = llm
         self.checkpointer = checkpointer
         self.langdev = langdev
-        self.generation_instructions = "Generate a description of the object."
-        self.extraction_instructions = "Extract the object from the following conversation."
-        self.max_messages = MAX_MESSAGES
-        self.extract_every_n_messages = EXTRACT_EVERY_N_MESSAGES
+        self.generation_instructions = agent.generation_instructions
+        self.extraction_instructions = agent.extraction_instructions
+        self.max_messages = og.max_messages
+        self.extract_every_n_messages = og.extract_every_n_messages
         self.current_message_count = 0
         self.memory_store = memory_store
         # Create extractor using the object class
@@ -203,8 +211,7 @@ class ObjectGenerator:
         builder.add_node("generate_description", self.generate_description)
         builder.add_node("extract", self.extract)
 
-        # Start generation immediately after initialization to avoid early interrupts
-        builder.add_edge("initialize_object", "generate_description")
+        builder.add_edge("initialize_object", "human_feedback")
         builder.add_edge("human_feedback", "generate_description")
         # Route to extract and human_feedback in parallel when extraction is needed
         builder.add_conditional_edges(
