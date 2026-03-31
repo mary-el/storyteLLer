@@ -9,7 +9,7 @@ dialogue:
     You are the Storyteller - a helpful assistant that helps the user create a story.
     You can generate the world and the characters for the story.
     Respond with JSON containing:
-    - "node": "generate_character", "generate_world", or "dialogue"
+    - "node": "generate_character", "generate_world", "dialogue" or "memory_tool"
     - "response": if node is dialogue, provide your response message
 
     If the most recent conversation message is a system event
@@ -17,6 +17,7 @@ dialogue:
     and ask the user for next instructions.
 
     As soon as user mentions creation of a character or world, set node to "generate_character" or "generate_world" and provide a prompt.
+    If the user mentions a previously created character or world, set node to "memory_tool".
     Otherwise, set node to "dialogue" and provide your response message.
 
 object_generator:

@@ -12,6 +12,7 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from app.agents.character_gen import CharacterGenerator
+from app.agents.memory_agent import MemoryAgent
 from app.agents.world_gen import WorldGenerator
 from app.config import AppConfig, load_app_config
 from app.state.schemas import StorytellerState
@@ -23,9 +24,14 @@ dotenv.load_dotenv()
 class DialogueResponse(BaseModel):
     """Structured response from dialogue node"""
 
-    node: Literal["generate_character", "generate_world", "dialogue"] = Field(
-        description="Next node to route to"
-    )
+    node: Literal[
+        "generate_character",
+        "generate_world",
+        "memory_tool",
+        "dialogue",
+    ] = Field(description="Next node to route to")
+
+    # Free-form response if node is 'dialogue'
     response: str = Field(description="Response message if node is 'dialogue'")
 
 
@@ -52,6 +58,7 @@ class Storyteller:
             langdev=langdev,
             app_config=self.config,
         )
+        self.memory_agent = MemoryAgent(self.llm, memory_store=memory_store)
         self.world_generator = WorldGenerator(
             self.llm,
             self.checkpointer,
@@ -71,7 +78,7 @@ class Storyteller:
 
     def route_generator(
         self, state: StorytellerState
-    ) -> Literal["generate_character", "generate_world", "dialogue"]:
+    ) -> Literal["generate_character", "generate_world", "memory_tool", "dialogue"]:
         """Route to appropriate generator based on structured response."""
         messages = state.get("messages", [])
         if not messages:
@@ -105,7 +112,11 @@ class Storyteller:
         response = await llm_with_structure.ainvoke(prompt)
         # Return JSON string as message content with ensure_ascii=False to preserve Unicode
         json_content = json.dumps(
-            {"node": response.node, "response": response.response}, ensure_ascii=False
+            {
+                "node": response.node,
+                "response": response.response,
+            },
+            ensure_ascii=False,
         )
         return {"messages": [AIMessage(content=json_content)], "status": None}
 
@@ -130,6 +141,7 @@ class Storyteller:
 
         # Add dialogue node
         graph.add_node("dialogue", self.dialogue)
+        graph.add_node("memory_tool", self.memory_agent.graph)
 
         # Add subgraphs directly as nodes - LangGraph will handle Command propagation
         graph.add_node("generate_character", self.character_generator.graph)
@@ -148,6 +160,7 @@ class Storyteller:
             {
                 "generate_character": "generate_character",
                 "generate_world": "generate_world",
+                "memory_tool": "memory_tool",
                 "dialogue": END,
             },
         )
@@ -157,6 +170,7 @@ class Storyteller:
 
         # Return to dialogue after object is finalized
         graph.add_edge("finalize_object", "dialogue")
+        graph.add_edge("memory_tool", "dialogue")
 
         return graph.compile(checkpointer=self.checkpointer)
 
