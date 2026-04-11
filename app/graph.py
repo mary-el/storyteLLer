@@ -58,7 +58,11 @@ class Storyteller:
             langdev=langdev,
             app_config=self.config,
         )
-        self.memory_agent = MemoryAgent(self.llm, memory_store=memory_store)
+        self.memory_agent = MemoryAgent(
+            self.llm,
+            system_prompt=self.config.memory_agent.system_prompt,
+            memory_store=memory_store,
+        )
         self.world_generator = WorldGenerator(
             self.llm,
             self.checkpointer,
@@ -170,7 +174,7 @@ class Storyteller:
 
         # Return to dialogue after object is finalized
         graph.add_edge("finalize_object", "dialogue")
-        graph.add_edge("memory_tool", "dialogue")
+        graph.add_edge("memory_tool", END)
 
         return graph.compile(checkpointer=self.checkpointer)
 

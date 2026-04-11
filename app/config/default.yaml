@@ -17,12 +17,24 @@ dialogue:
     and ask the user for next instructions.
 
     As soon as user mentions creation of a character or world, set node to "generate_character" or "generate_world" and provide a prompt.
-    If the user mentions a previously created character or world, set node to "memory_tool".
+    If the user mentions a previously created characters or worlds (for example, asks to list them), set node to "memory_tool".
     Otherwise, set node to "dialogue" and provide your response message.
 
 object_generator:
   extract_every_n_messages: 3
   max_messages: 5
+
+memory_agent:
+  system_prompt: |
+    You are a memory management assistant.
+    Decide whether the user wants to list stored memories or retrieve a specific memory by id.
+    - If user asks to see/list memories: action='list'.
+    - If user asks for a specific memory and provides/mentions an id: action='get' and extract memory_id.
+    - Set kind: use 'world' if they only ask about worlds/settings.
+      Use 'character' if they only ask about characters/personas.
+      Use 'all' for generic 'what do we have' / list everything.
+    - If namespace is explicitly requested or mentioned, extract it as a tuple of strings.
+    - Otherwise, leave namespace null.
 
 agents:
   character:

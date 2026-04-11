@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import traceback
 
 import dotenv
 from langgraph.store.memory import InMemoryStore
@@ -14,30 +15,30 @@ def _print_message(message: str) -> None:
     print("--- End Response ---\n")
 
 
-async def process_single_message(storyteller: Storyteller, message: str, user_id: str) -> bool:
+async def process_single_message(storyteller: Storyteller, user_message: str, user_id: str) -> bool:
     """
     Process a single message through the storyteller and display the response.
 
     Args:
         storyteller: The storyteller instance
-        message: The message to process
+        user_message: The user's input text
     """
     try:
-        response_text = await storyteller.tell(message, user_id)
+        response_text = await storyteller.tell(user_message, user_id)
 
         try:
             response_json = json.loads(response_text)
-            message = response_json.get("response", "")
+            display_text = response_json.get("response", "") or ""
         except json.JSONDecodeError:
-            message = response_text
-        if message:
-            _print_message(message)
+            display_text = response_text
+        if display_text:
+            _print_message(display_text)
         else:
             print("No response received for message.")
         return True
-    except Exception as e:
-        print(f"Error processing message '{message}': {e}")
-        raise
+    except Exception:
+        traceback.print_exc()
+        return True
 
 
 async def interactive_conversation(storyteller: Storyteller, user_id: str) -> None:
@@ -74,9 +75,8 @@ async def interactive_conversation(storyteller: Storyteller, user_id: str) -> No
         except EOFError:
             print("\n\nEnd of input. Finishing conversation...")
             break
-        except Exception as e:
-            print(f"Error in conversation: {e}")
-            print("Continuing...")
+        except Exception:
+            traceback.print_exc()
 
 
 async def main(user_id: str = "1") -> None:

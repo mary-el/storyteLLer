@@ -4,6 +4,7 @@ from app.config.schema import (
     AppConfig,
     DialogueConfig,
     LLMConfig,
+    MemoryAgentConfig,
     ObjectAgentConfig,
     ObjectGeneratorConfig,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "AppConfig",
     "DialogueConfig",
     "LLMConfig",
+    "MemoryAgentConfig",
     "ObjectAgentConfig",
     "ObjectGeneratorConfig",
 ]

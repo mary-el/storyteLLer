@@ -31,8 +31,15 @@ class AgentsConfig(BaseModel):
     world: ObjectAgentConfig
 
 
+class MemoryAgentConfig(BaseModel):
+    system_prompt: str = Field(
+        description="Prompt for classifying memory list/get intent and kind from the conversation"
+    )
+
+
 class AppConfig(BaseModel):
     llm: LLMConfig
     dialogue: DialogueConfig
     object_generator: ObjectGeneratorConfig = Field(default_factory=ObjectGeneratorConfig)
     agents: AgentsConfig
+    memory_agent: MemoryAgentConfig
