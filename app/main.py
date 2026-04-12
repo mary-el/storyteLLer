@@ -8,6 +8,9 @@ from langgraph.store.memory import InMemoryStore
 
 from app.graph import Storyteller
 
+# Synthetic first user line so world gen runs immediately; avoids an extra turn before any draft.
+_BOOTSTRAP_MESSAGE = "Begin world creation."
+
 
 def _print_message(message: str) -> None:
     print("\n--- Model Response ---")
@@ -33,8 +36,6 @@ async def process_single_message(storyteller: Storyteller, user_message: str, us
             display_text = response_text
         if display_text:
             _print_message(display_text)
-        else:
-            print("No response received for message.")
         return True
     except Exception:
         traceback.print_exc()
@@ -49,8 +50,12 @@ async def interactive_conversation(storyteller: Storyteller, user_id: str) -> No
         storyteller: The storyteller instance
     """
     print("\n=== Interactive Storyteller ===")
-    print("Enter your messages to build the story.")
     print("Type 'exit', 'quit', or 'done' to finish.\n")
+    _print_message(
+        "I am a storyteller. Let's create a story together. "
+        "We'll start by creating a world — the first assistant reply is triggered automatically."
+    )
+    await process_single_message(storyteller, _BOOTSTRAP_MESSAGE, user_id)
 
     while True:
         try:

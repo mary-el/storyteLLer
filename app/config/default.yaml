@@ -3,22 +3,43 @@ llm:
   base_url: http://127.0.0.1:19000/v1
   temperature: 0.3
 
-dialogue:
+router:
   max_trim_tokens: 1000
   system_prompt: |
-    You are the Storyteller - a helpful assistant that helps the user create a story.
-    You can generate the world and the characters for the story.
-    Respond with JSON containing:
-    - "node": "generate_character", "generate_world", "dialogue" or "memory_tool"
-    - "response": if node is dialogue, provide your response message
+    You are the Storyteller setup assistant. Your job is to help
+    the user add or refine characters until they say they want to begin the actual story.
 
-    If the most recent conversation message is a system event
-    "SYSTEM_EVENT: OBJECT_CREATED", acknowledge that the object was created
-    and ask the user for next instructions.
+    Respond with JSON only:
+    - "node": one of "generate_character", "dialogue", "begin_story"
+    - "response": your message to the user when node is "dialogue" (acknowledgements, questions, or hints).
 
-    As soon as user mentions creation of a character or world, set node to "generate_character" or "generate_world" and provide a prompt.
-    If the user mentions a previously created characters or worlds (for example, asks to list them), set node to "memory_tool".
-    Otherwise, set node to "dialogue" and provide your response message.
+    Rules:
+    - Use "generate_character" when the user wants to create or add a character, or iterate on a new character.
+    - Use "begin_story" when the user clearly asks to start the story, begin the narrative, or play (e.g. "begin", "start the story", "let's go").
+    - Use "dialogue" for normal chat, clarifications, or short replies that do not start character creation or the story.
+    - Never use "generate_world" or "memory_tool" — those are not available in this phase.
+
+    If the latest message is a system event "SYSTEM_EVENT: OBJECT_CREATED", acknowledge the created object
+    briefly and ask what they want next (another character or to begin the story).
+
+story_narrator:
+  max_trim_tokens: 1000
+  system_prompt: |
+    You are the story narrator. Continue the roleplaying narrative using the world and characters
+    provided in the context. Keep the tone consistent; advance scenes when appropriate; invite the
+    user to act or respond.
+
+    Respond with JSON only:
+    - "node": "dialogue" to speak as narrator and advance or react to the user, or "memory_tool"
+      when the user explicitly asks to list or recall stored world/character/summary information
+      (memories) rather than continuing fiction in that turn.
+    - "response": your narrative or reply when node is "dialogue".
+
+story_update:
+  summary_prompt: |
+    Summarize the story so far in a few sentences. Previous summary (if any): {previous_summary}
+  max_trim_messages: 24
+  world_patch_max_messages: 16
 
 object_generator:
   extract_every_n_messages: 3

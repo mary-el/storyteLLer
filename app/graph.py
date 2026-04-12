@@ -15,24 +15,33 @@ from app.agents.character_gen import CharacterGenerator
 from app.agents.memory_agent import MemoryAgent
 from app.agents.world_gen import WorldGenerator
 from app.config import AppConfig, load_app_config
-from app.state.schemas import StorytellerState
+from app.state.schemas import (
+    CharacterObject,
+    Story,
+    StoryStep,
+    StorytellerState,
+    WorldObject,
+    coerce_story,
+)
 from app.utils import logger
 
 dotenv.load_dotenv()
 
 
-class DialogueResponse(BaseModel):
-    """Structured response from dialogue node"""
+class RouterResponse(BaseModel):
+    """Structured response from setup router (world exists; characters until begin)."""
 
-    node: Literal[
-        "generate_character",
-        "generate_world",
-        "memory_tool",
-        "dialogue",
-    ] = Field(description="Next node to route to")
+    node: Literal["generate_character", "dialogue", "begin_story"] = Field(
+        description="Next node: character subgraph, end turn, or enter story phase"
+    )
+    response: str = Field(description="User-visible message when node is dialogue or routing hint")
 
-    # Free-form response if node is 'dialogue'
-    response: str = Field(description="Response message if node is 'dialogue'")
+
+class StoryResponse(BaseModel):
+    """Structured response from story narrator."""
+
+    node: Literal["memory_tool", "dialogue"] = Field(description="Memory lookup or narrative reply")
+    response: str = Field(description="Narrative or reply when node is dialogue")
 
 
 class Storyteller:
@@ -70,110 +79,191 @@ class Storyteller:
             langdev=langdev,
             app_config=self.config,
         )
-        self.template = ChatPromptTemplate(
+        self.router_template = ChatPromptTemplate(
             [
                 MessagesPlaceholder(variable_name="conversation", optional=True),
-                ("system", self.config.dialogue.system_prompt),
+                ("system", self.config.router.system_prompt),
             ]
         )
-        self.max_len = self.config.dialogue.max_trim_tokens
+        self.router_max_len = self.config.router.max_trim_tokens
+        self.story_max_len = self.config.story_narrator.max_trim_tokens
         self.graph = self.build_graph()
         self.waiting_for_feedback = False
 
-    def route_generator(
+    def next_after_start(
         self, state: StorytellerState
-    ) -> Literal["generate_character", "generate_world", "memory_tool", "dialogue"]:
-        """Route to appropriate generator based on structured response."""
+    ) -> Literal["generate_world", "router", "story"]:
+        if state.get("phase") == "story":
+            return "story"
+        story = coerce_story(state.get("story"))
+        if story is None or story.world is None:
+            return "generate_world"
+        return "router"
+
+    def route_from_router(
+        self, state: StorytellerState
+    ) -> Literal["generate_character", "begin_story", "dialogue"]:
         messages = state.get("messages", [])
         if not messages:
             return "dialogue"
-
         last_message = messages[-1]
         content = getattr(last_message, "content", "")
-
         try:
             data = json.loads(content)
             node = data.get("node", "dialogue")
-            return node
-        except (json.JSONDecodeError, AttributeError):
-            # Fallback to dialogue if JSON parsing fails
-            logger.warning(f"Failed to parse JSON: {content}")
+            if node in ["begin_story", "generate_character"]:
+                return node
+            return "dialogue"
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            logger.warning(f"Failed to parse router JSON: {content!r}")
             return "dialogue"
 
-    async def dialogue(self, state: StorytellerState) -> StorytellerState:
-        """Dialogue node for the storyteller"""
+    def route_from_story(self, state: StorytellerState) -> Literal["memory_tool", "dialogue"]:
+        messages = state.get("messages", [])
+        if not messages:
+            return "dialogue"
+        last_message = messages[-1]
+        content = getattr(last_message, "content", "")
+        try:
+            data = json.loads(content)
+            node = data.get("node", "dialogue")
+            return node if node == "memory_tool" else "dialogue"
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            logger.warning(f"Failed to parse story JSON: {content!r}")
+            return "dialogue"
+
+    @staticmethod
+    def _story_context_block(story: Story | None) -> str:
+        if not story:
+            return "No story context."
+        parts: list[str] = []
+        if story.world is not None:
+            parts.append("World:\n" + story.world.model_dump_json(indent=2))
+        for co in story.characters:
+            parts.append(f"Character ({co.object_id}):\n" + co.model_dump_json(indent=2))
+        if not parts:
+            return "Story setup in progress."
+        return "\n\n".join(parts)
+
+    async def router_node(self, state: StorytellerState) -> StorytellerState:
         messages = trim_messages(
             state["messages"],
-            max_tokens=self.max_len,
+            max_tokens=self.router_max_len,
             token_counter=len,
             strategy="last",
             start_on="human",
             include_system=True,
         )
-        logger.debug("routing to dialogue")
-        prompt = self.template.invoke({"conversation": messages})
-        llm_with_structure = self.llm.with_structured_output(DialogueResponse)
+        logger.debug("routing to router")
+        prompt = self.router_template.invoke({"conversation": messages})
+        llm_with_structure = self.llm.with_structured_output(RouterResponse)
         response = await llm_with_structure.ainvoke(prompt)
-        # Return JSON string as message content with ensure_ascii=False to preserve Unicode
         json_content = json.dumps(
-            {
-                "node": response.node,
-                "response": response.response,
-            },
+            {"node": response.node, "response": response.response},
             ensure_ascii=False,
         )
         return {"messages": [AIMessage(content=json_content)], "status": None}
 
+    async def story_node(self, state: StorytellerState) -> StorytellerState:
+        story = coerce_story(state.get("story"))
+        context = self._story_context_block(story)
+        combined_system = (
+            f"{self.config.story_narrator.system_prompt}\n\n--- Current story setup ---\n{context}"
+        )
+        messages = trim_messages(
+            state["messages"],
+            max_tokens=self.story_max_len,
+            token_counter=len,
+            strategy="last",
+            start_on="human",
+            include_system=True,
+        )
+        logger.debug("routing to story narrator")
+        # Do not pass JSON context through ChatPromptTemplate — `{` in JSON would be parsed as variables.
+        llm_messages = [SystemMessage(content=combined_system), *messages]
+        llm_with_structure = self.llm.with_structured_output(StoryResponse)
+        response = await llm_with_structure.ainvoke(llm_messages)
+        json_content = json.dumps(
+            {"node": response.node, "response": response.response},
+            ensure_ascii=False,
+        )
+        return {"messages": [AIMessage(content=json_content)], "status": None}
+
+    def enter_story(self, state: StorytellerState) -> StorytellerState:
+        return {"phase": "story"}
+
     def finalize_object(self, state: StorytellerState) -> StorytellerState:
-        """Finalize object generation and extract object_id"""
         logger.debug("Finalizing object generation")
         generated_object = state.get("generated_object")
-        if generated_object:
-            return {
-                "messages": [
-                    SystemMessage(
-                        content=f"SYSTEM_EVENT: OBJECT_CREATED: {generated_object.model_dump_json()}"
-                    )
-                ],
-                "generated_object": None,
-            }
-        return {}
+        if not generated_object:
+            return {}
+        story = coerce_story(state.get("story")) or Story()
+        if isinstance(generated_object, WorldObject):
+            story = story.model_copy(update={"world": generated_object.world})
+            phase: StoryStep = "characters"
+        elif isinstance(generated_object, CharacterObject):
+            story = story.model_copy(update={"characters": [*story.characters, generated_object]})
+            phase = state.get("phase", "characters")
+        else:
+            phase = state.get("phase", "characters")
+        return {
+            "messages": [
+                SystemMessage(
+                    content=f"SYSTEM_EVENT: OBJECT_CREATED: {generated_object.model_dump_json()}"
+                )
+            ],
+            "generated_object": None,
+            "story": story,
+            "phase": phase,
+        }
 
     def build_graph(self):
-        """Build the graph for the storyteller with integrated subgraphs"""
         graph = StateGraph(StorytellerState)
 
-        # Add dialogue node
-        graph.add_node("dialogue", self.dialogue)
+        graph.add_node("router", self.router_node)
+        graph.add_node("story", self.story_node)
+        graph.add_node("enter_story", self.enter_story)
         graph.add_node("memory_tool", self.memory_agent.graph)
 
-        # Add subgraphs directly as nodes - LangGraph will handle Command propagation
         graph.add_node("generate_character", self.character_generator.graph)
         graph.add_node("generate_world", self.world_generator.graph)
-
-        # Add finalize nodes
         graph.add_node("finalize_object", self.finalize_object)
 
-        # Start with dialogue
-        graph.add_edge(START, "dialogue")
-
-        # Route from dialogue to prepare nodes or end
         graph.add_conditional_edges(
-            "dialogue",
-            self.route_generator,
+            START,
+            self.next_after_start,
+            {
+                "generate_world": "generate_world",
+                "router": "router",
+                "story": "story",
+            },
+        )
+
+        graph.add_conditional_edges(
+            "router",
+            self.route_from_router,
             {
                 "generate_character": "generate_character",
-                "generate_world": "generate_world",
+                "begin_story": "enter_story",
+                "dialogue": END,
+            },
+        )
+
+        graph.add_edge("enter_story", "story")
+
+        graph.add_conditional_edges(
+            "story",
+            self.route_from_story,
+            {
                 "memory_tool": "memory_tool",
                 "dialogue": END,
             },
         )
-        # Connect subgraphs to finalize nodes
+
         graph.add_edge("generate_character", "finalize_object")
         graph.add_edge("generate_world", "finalize_object")
-
-        # Return to dialogue after object is finalized
-        graph.add_edge("finalize_object", "dialogue")
+        graph.add_edge("finalize_object", "router")
+        # End after memory so the list/get reply stays the last message; next user turn goes START → story.
         graph.add_edge("memory_tool", END)
 
         return graph.compile(checkpointer=self.checkpointer)
@@ -189,17 +279,25 @@ class Storyteller:
         return result
 
     async def tell(self, query: str, user_id: str, thread_id: str = None) -> str:
-        if not self.waiting_for_feedback:
-            result = await self.arun(query, user_id, thread_id)
-        else:
+        # Route resume vs new input from checkpoint truth, not an in-memory flag (avoids stale
+        # waiting_for_feedback sending normal story turns as Command(resume) into object_gen).
+        config = {"configurable": {"user_id": user_id, "thread_id": thread_id or user_id}}
+        snap = await self.graph.aget_state(config)
+        if snap.interrupts:
             logger.info(f"Sending command: {query}")
             result = await self.arun(Command(resume=query), user_id, thread_id)
+        else:
+            result = await self.arun(query, user_id, thread_id)
         interrupts = result.get("__interrupt__")
-        self.waiting_for_feedback = interrupts is not None
+        self.waiting_for_feedback = bool(interrupts)
         if interrupts:
             if isinstance(interrupts, list) and interrupts:
                 first = interrupts[0]
-                return first.value if hasattr(first, "value") else str(first)
+                val = first.value if hasattr(first, "value") else first
+                if isinstance(val, dict):
+                    text = (val.get("draft") or val.get("hint") or "") or ""
+                    return text.strip() if text.strip() else str(val)
+                return str(val) if val is not None else ""
             return str(interrupts)
         messages = result.get("messages", [])
         last_message = messages[-1] if messages else None

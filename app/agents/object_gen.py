@@ -3,7 +3,13 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 import dotenv
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, trim_messages
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    trim_messages,
+)
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
@@ -13,10 +19,21 @@ from langgraph.types import interrupt
 from trustcall import create_extractor
 
 from app.config.schema import AppConfig, ObjectAgentConfig
-from app.state.schemas import State
+from app.state.schemas import StorytellerState
 from app.utils import logger
 
 dotenv.load_dotenv()
+
+
+def _last_assistant_text(messages: list) -> str | None:
+    """Latest non-empty AIMessage string in this subgraph (reliable before interrupt)."""
+    for msg in reversed(messages or []):
+        if not isinstance(msg, AIMessage):
+            continue
+        c = msg.content
+        if isinstance(c, str) and c.strip():
+            return c
+    return None
 
 
 class ObjectGenerator(ABC):
@@ -74,7 +91,7 @@ class ObjectGenerator(ABC):
         """Return the field name in state (e.g., 'character', 'world')"""
         raise NotImplementedError("Subclasses must implement this property")
 
-    def initialize_object_node(self, state: State, store: BaseStore = None):
+    def initialize_object_node(self, state: StorytellerState, store: BaseStore = None):
         """Initialize the object with an ID if it doesn't exist."""
         store = store or self.memory_store
         logger.debug(f"Initializing object with store: {store}")
@@ -85,7 +102,7 @@ class ObjectGenerator(ABC):
         logger.debug(f"Object initialized: {obj}")
         return {"generated_object": obj}
 
-    async def extract(self, state: State, store: BaseStore = None):
+    async def extract(self, state: StorytellerState, store: BaseStore = None):
         """
         Extract the object from the conversation.
         """
@@ -131,23 +148,28 @@ class ObjectGenerator(ABC):
             logger.error(f"Error extracting object: {e}")
             return {}
 
-    async def human_feedback(self, state: State, store: BaseStore = None):
+    async def human_feedback(self, state: StorytellerState, store: BaseStore = None):
         """Node that interrupts to request human feedback, returns feedback on resume"""
         logger.debug("Requesting human feedback via interrupt()")
         # interrupt() will pause execution and wait for Command(resume=...)
         # On resume, it returns the value passed to Command(resume=value)
-        messages = state.get("messages", [])
-        last_message = messages[-1] if messages else None
-        interrupt_value = last_message.content if last_message else "Waiting for feedback..."
+        # Payload shown to the client while paused — must not be the user's last line (that
+        # looked like the model "echoing" the first query). Resume still uses the next message.
+        hint = (
+            f"Continue the conversation to build this {self.object_field_name}: "
+            "add detail, refine, or say when you are satisfied."
+        )
+        draft = _last_assistant_text(state.get("messages", []))
+        payload: dict = {"hint": hint, "draft": draft}
 
         # Call interrupt() - this will pause on first call, return feedback value on resume
-        feedback = interrupt(interrupt_value)
+        feedback = interrupt(payload)
         logger.info(f"Received feedback from interrupt: {feedback}")
 
         # Add feedback as HumanMessage to continue the conversation
         return {"messages": [HumanMessage(content=feedback)]}
 
-    def should_extract(self, state: State, store: BaseStore = None):
+    def should_extract(self, state: StorytellerState, store: BaseStore = None):
         """Return if the extract node should be executed"""
         # Check if object is created or max messages reached
         status = state.get("status", "in_progress")
@@ -160,7 +182,7 @@ class ObjectGenerator(ABC):
         logger.debug("Continuing to human feedback")
         return "human_feedback"
 
-    def should_continue(self, state: State, store: BaseStore = None):
+    def should_continue(self, state: StorytellerState, store: BaseStore = None):
         """Return the next node to execute"""
         # Check if object is created
         status = state.get("status", "in_progress")
@@ -170,7 +192,7 @@ class ObjectGenerator(ABC):
         # Otherwise continue to human feedback
         return "human_feedback"
 
-    async def generate_description(self, state: State, store: BaseStore = None):
+    async def generate_description(self, state: StorytellerState, store: BaseStore = None):
         """Generate a description of the object."""
         # Generate character description
         messages = self.trim_messages(state.get("messages", []))
@@ -204,14 +226,15 @@ class ObjectGenerator(ABC):
     def build_graph(self):
         """Build the graph"""
         logger.debug("Building graph for ObjectGenerator")
-        builder = StateGraph(State)
+        builder = StateGraph(StorytellerState)
         builder.add_node("initialize_object", self.initialize_object_node)
         builder.add_node("human_feedback", self.human_feedback)
         builder.set_entry_point("initialize_object")
         builder.add_node("generate_description", self.generate_description)
         builder.add_node("extract", self.extract)
 
-        builder.add_edge("initialize_object", "human_feedback")
+        # Run generation on the first user message immediately; interrupt only after a draft exists.
+        builder.add_edge("initialize_object", "generate_description")
         builder.add_edge("human_feedback", "generate_description")
         # Route to extract and human_feedback in parallel when extraction is needed
         builder.add_conditional_edges(

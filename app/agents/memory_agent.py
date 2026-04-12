@@ -10,7 +10,7 @@ from langgraph.store.base import BaseStore
 from pydantic import BaseModel, Field
 
 from app.memory import get_memory, list_memories
-from app.state.schemas import StorytellerState
+from app.state.schemas import Story, StorytellerState, coerce_story
 from app.utils import logger
 
 
@@ -65,6 +65,34 @@ def _router_message(response: str) -> str:
     return json.dumps({"node": "dialogue", "response": response}, ensure_ascii=False)
 
 
+def _story_list_lines(story: Story, kind: Literal["all", "character", "world"]) -> list[str]:
+    lines: list[str] = []
+    if kind in ("all", "world") and story.world is not None:
+        payload = json.dumps(story.world.model_dump(), ensure_ascii=False, default=str, indent=2)
+        lines.append(f"story:{story.story_id} (world)\n{payload}")
+    if kind in ("all", "character"):
+        for co in story.characters:
+            payload = json.dumps(co.model_dump(), ensure_ascii=False, default=str, indent=2)
+            lines.append(f"{co.object_id} (character)\n{payload}")
+    if kind == "all" and (story.summary or "").strip():
+        lines.append(f"summary\n{story.summary.strip()}")
+    return lines
+
+
+def _story_get_line(story: Story, memory_id: str) -> str | None:
+    if memory_id == story.story_id:
+        payload = json.dumps(story.model_dump(), ensure_ascii=False, default=str, indent=2)
+        return f"{memory_id}\n{payload}"
+    for co in story.characters:
+        if co.object_id == memory_id:
+            payload = json.dumps(co.model_dump(), ensure_ascii=False, default=str, indent=2)
+            return f"{memory_id}\n{payload}"
+    if story.world is not None and memory_id == f"{story.story_id}:world":
+        payload = json.dumps(story.world.model_dump(), ensure_ascii=False, default=str, indent=2)
+        return f"{memory_id}\n{payload}"
+    return None
+
+
 class MemoryAgent:
     """Memory management agent (list/get) backed by a LangGraph store."""
 
@@ -112,6 +140,23 @@ class MemoryAgent:
 
         user_id = state.get("user_id", "default")
         namespace = intent.namespace or (user_id, "memories")
+        story = coerce_story(state.get("story"))
+
+        if story is not None:
+            if intent.action == "list":
+                lines = _story_list_lines(story, intent.kind)
+                text = (
+                    _format_numbered_list(lines)
+                    if lines
+                    else "No matching content in the current story."
+                )
+                logger.debug(f"Memory agent list from story: kind={intent.kind}")
+                return {"messages": [AIMessage(content=_router_message(text))]}
+            if intent.action == "get" and intent.memory_id:
+                line = _story_get_line(story, intent.memory_id)
+                if line is not None:
+                    text = f"1. {line}"
+                    return {"messages": [AIMessage(content=_router_message(text))]}
 
         if intent.action == "get":
             if not intent.memory_id:
