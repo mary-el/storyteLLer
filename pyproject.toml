@@ -1,0 +1,18 @@
+[project]
+name = "storyteller"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "dotenv>=0.9.9",
+    "langchain>=0.3.25",
+    "langchain-openai>=1.2.2",
+    "langgraph>=1.0.4",
+    "loguru>=0.7.0",
+    "pre-commit>=3.6.0",
+    "pydantic>=2.10.0",
+    "pyyaml>=6.0.1",
+    "streamlit>=1.58.0",
+    "trustcall>=0.0.39",
+]

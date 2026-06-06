@@ -45,6 +45,13 @@ class WorldObject(BaseObject):
 StoryStep = Literal["world", "characters", "story"]
 
 
+class StoryEvent(BaseModel):
+    """A key event extracted from the narrative."""
+
+    turn: int
+    event: str
+
+
 class Story(BaseModel):
     """One world, multiple characters, running summary."""
 
@@ -53,6 +60,7 @@ class Story(BaseModel):
     world: Optional[World] = None
     characters: list[CharacterObject] = Field(default_factory=list)
     summary: str = Field("")
+    events: list[StoryEvent] = Field(default_factory=list)
 
 
 def coerce_story(raw: Any) -> Optional[Story]:
@@ -79,3 +87,4 @@ class StorytellerState(State):
 
     story: NotRequired[Story]
     phase: NotRequired[StoryStep]
+    turn: NotRequired[int]

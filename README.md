@@ -1,23 +1,53 @@
 # storyteLLer
 
-Lightweight LangGraph-based storytelling assistant: build a **world**, add **characters**, then run the **story** with an optional **memory** tool for listing or fetching world/character data from the in-session `Story` aggregate.
+Lightweight LangGraph-based storytelling assistant: build a **world**, add **characters**, then run the **story** with rolling memory, in-story character updates, and optional memory lookup.
 
 ## Run
 
-- Install dependencies and set environment variables (for example in `.env`).
-- Start the CLI:
-  - `python -m app.main`
-  - `python -m app.main --user-id user123`
+Install dependencies and set environment variables (for example in `.env`).
 
-Configuration lives in [`app/config/default.yaml`](app/config/default.yaml) (override with `APP_CONFIG_PATH`). Key sections: `router` (setup-phase prompts), `story_narrator` (narrator + routing), `agents` (world/character object generators), `memory_agent`.
+**CLI**
+
+```bash
+python -m app.main
+python -m app.main --user-id user123
+```
+
+**Streamlit UI**
+
+```bash
+streamlit run app/ui.py
+```
+
+The UI shows the current phase, world, characters, rolling summary, and event log in the sidebar. World creation starts automatically on first load (same bootstrap as the CLI).
+
+Configuration lives in `[app/config/default.yaml](app/config/default.yaml)` (override with `APP_CONFIG_PATH`). Key sections: `router` (setup phase), `story_narrator` (narrator routing), `story_update` (rolling summary), `agents` (world/character generators), `memory_agent`.
 
 ## Pipeline overview
 
-1. **World (once)** — Until `story.world` is set, each new user turn starts at `generate_world` (object subgraph). The router never starts a second world.
-2. **Setup router** — With a world in place, `router` handles chat and may route to `generate_character` or to `begin_story` when the user wants to start the narrative.
-3. **Story** — After `enter_story`, `phase` is `story`; turns go to the `story` node (narrator). The model may route to `memory_tool` for list/get requests; that subgraph ends the turn (`memory_tool` → `END`) so the memory reply stays visible; the next message starts again at `START` → `story`.
+1. **World (once)** — Until `story.world` is set, each new user turn starts at `generate_world`.
+2. **Setup router** — With a world in place, `router` handles chat and may route to `generate_character` or `begin_story` when the user wants to start the narrative.
+3. **Story** — After `enter_story`, `phase` is `story`. Each turn goes to the `story` narrator, which may route to:
+  - `**dialogue`** — normal narrative; then `story_update` runs before the turn ends.
+  - `**update_characters**` — patch a character whose state changed (inventory, relationships, etc.); then `story_update`.
+  - `**memory_tool**` — list or fetch world/character/event data; ends the turn without `story_update`.
 
-`finalize_object` merges finished `WorldObject` / `CharacterObject` into [`Story`](app/state/schemas.py) (`story` + `phase` on `StorytellerState`).
+`finalize_object` merges finished `WorldObject` / `CharacterObject` into `[Story](app/state/schemas.py)` (`story` + `phase` on `StorytellerState`).
+
+## Memory
+
+Two layers:
+
+
+| Layer               | Where                  | What                                                                                              |
+| ------------------- | ---------------------- | ------------------------------------------------------------------------------------------------- |
+| **Story aggregate** | `Story` in graph state | `world`, `characters`, `summary`, `events`                                                        |
+| **Store**           | `InMemoryStore`        | `(user_id, "memories")` — world/character objects; `(user_id, "events")` — per-turn event records |
+
+
+After each narrative turn, `story_update` refreshes `Story.summary`, appends a `StoryEvent`, and writes the event to the store. The narrator can call `memory_tool` proactively to recall past events or character details not in context.
+
+During story play, `update_characters` uses the same trustcall extraction pattern as setup to patch character fields in place.
 
 ## Top-level graph (`StorytellerState`)
 
@@ -35,9 +65,13 @@ flowchart TD
   router -->|dialogue| END
   enter_story --> story
   story -->|memory_tool| memory_tool
-  story -->|dialogue| END
+  story -->|dialogue| story_update
+  story -->|update_characters| update_characters
+  update_characters --> story_update
+  story_update --> END
   memory_tool --> END
 ```
+
 
 
 ## Character / world subgraph (`ObjectGenerator`)
@@ -51,7 +85,3 @@ flowchart TD
   extract -->|created| END
   extract -->|continue| human_feedback
 ```
-
-The interactive CLI ([`app/main.py`](app/main.py)) sends one synthetic bootstrap user line after the welcome so the first model turn runs without waiting for typed input. Further turns use your real messages.
-
-`human_feedback` uses LangGraph `interrupt()` so the CLI can pause for input. The payload is `{"draft","hint"}` (`draft` = last assistant line when present). **`tell()` only surfaces `draft` to the user**—the English `hint` is not printed (the startup message explains the flow). `tell()` chooses **resume** vs **new message** using the checkpoint (`aget_state` / `interrupts`), not only an in-memory flag, so normal story lines are not mis-sent as `Command(resume)` into this subgraph.

@@ -29,11 +29,18 @@ story_narrator:
     provided in the context. Keep the tone consistent; advance scenes when appropriate; invite the
     user to act or respond.
 
-    Respond with JSON only:
-    - "node": "dialogue" to speak as narrator and advance or react to the user, or "memory_tool"
-      when the user explicitly asks to list or recall stored world/character/summary information
-      (memories) rather than continuing fiction in that turn.
-    - "response": your narrative or reply when node is "dialogue".
+    Respond with JSON only — fields:
+    - "node": one of "dialogue", "memory_tool", or "update_characters"
+    - "response": your narrative or reply (always fill this)
+    - "character_id": object_id of the character to update (only when node is "update_characters")
+
+    Routing rules:
+    - Use "dialogue" for normal narrative turns and reactions to the user.
+    - Use "memory_tool" when you need to recall past events or stored details not visible in context,
+      or when the user explicitly asks to list/recall memories.
+    - Use "update_characters" when a character's state has clearly changed in this turn — inventory
+      gained or lost, new relationship formed, injury, ability unlocked, etc. Set "character_id" to
+      that character's object_id from the context. Still write the narrative in "response".
 
 story_update:
   summary_prompt: |
@@ -54,8 +61,9 @@ memory_agent:
     - Set kind: use 'world' if they only ask about worlds/settings.
       Use 'character' if they only ask about characters/personas.
       Use 'all' for generic 'what do we have' / list everything.
-    - If namespace is explicitly requested or mentioned, extract it as a tuple of strings.
-    - Otherwise, leave namespace null.
+    - Past story events are stored under namespace ("user_id", "events"). If the user asks about
+      past events or story history, set namespace to that tuple.
+    - Otherwise, leave namespace null (defaults to ("user_id", "memories")).
 
 agents:
   character:
