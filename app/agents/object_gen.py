@@ -20,7 +20,7 @@ from trustcall import create_extractor
 
 from app.config.schema import AppConfig, ObjectAgentConfig
 from app.state.schemas import StorytellerState
-from app.utils import logger
+from app.utils import logger, split_thinking, strip_thinking
 
 dotenv.load_dotenv()
 
@@ -32,7 +32,7 @@ def _last_assistant_text(messages: list) -> str | None:
             continue
         c = msg.content
         if isinstance(c, str) and c.strip():
-            return c
+            return strip_thinking(c)
     return None
 
 
@@ -194,7 +194,6 @@ class ObjectGenerator(ABC):
 
     async def generate_description(self, state: StorytellerState, store: BaseStore = None):
         """Generate a description of the object."""
-        # Generate character description
         messages = self.trim_messages(state.get("messages", []))
         self.current_message_count += 1
         start_time = time.time()
@@ -204,18 +203,27 @@ class ObjectGenerator(ABC):
         answer = await self.llm.ainvoke(
             messages + [SystemMessage(content=self.generation_instructions)]
         )
-        logger.debug(f"Generated description: {answer.content}")
+        thinking, visible = split_thinking(answer.content)
+        logger.debug(f"Generated description: {visible}")
+        if thinking:
+            logger.debug(f"Model thinking ({len(thinking)} chars)")
         end_time = time.time()
         logger.debug(f"Time taken: {end_time - start_time} seconds")
-        if answer.content.lower().strip() == "done":
+        if visible.lower().strip() == "done":
             logger.debug("Object created")
             return {"status": "created"}
-        return {"messages": [answer]}
+        return {
+            "messages": [AIMessage(content=visible, response_metadata=answer.response_metadata)]
+        }
 
     def trim_messages(self, messages: list[BaseMessage]):
-        """Trim the messages to the max messages."""
+        """Trim the messages to the max messages, stripping model thinking from AIMessages."""
+        cleaned = [
+            AIMessage(content=strip_thinking(m.content)) if isinstance(m, AIMessage) else m
+            for m in messages
+        ]
         return trim_messages(
-            messages,
+            cleaned,
             max_tokens=self.max_messages,
             token_counter=len,
             strategy="last",

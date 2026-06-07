@@ -64,3 +64,4 @@ class AppConfig(BaseModel):
     object_generator: ObjectGeneratorConfig = Field(default_factory=ObjectGeneratorConfig)
     agents: AgentsConfig
     memory_agent: MemoryAgentConfig
+    saves_dir: str = "saves"

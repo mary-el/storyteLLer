@@ -1,5 +1,6 @@
 import json
 import uuid
+from pathlib import Path
 from typing import Literal, Optional
 
 import dotenv
@@ -13,6 +14,7 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 from trustcall import create_extractor
 
+from app import persistence
 from app.agents.character_gen import CharacterGenerator
 from app.agents.memory_agent import MemoryAgent
 from app.agents.world_gen import WorldGenerator
@@ -27,7 +29,7 @@ from app.state.schemas import (
     WorldObject,
     coerce_story,
 )
-from app.utils import logger
+from app.utils import logger, strip_thinking
 
 dotenv.load_dotenv()
 
@@ -48,9 +50,8 @@ class StoryResponse(BaseModel):
         description="Memory lookup, narrative reply, or character state update"
     )
     response: str = Field(description="Narrative or reply when node is dialogue")
-    character_id: Optional[str] = Field(
-        default=None,
-        description="object_id of the character to update when node is update_characters",
+    character_id: str | None = Field(
+        description="Always include. Use null unless node is update_characters."
     )
 
 
@@ -62,6 +63,9 @@ class Storyteller:
         config: Optional[AppConfig] = None,
     ) -> None:
         self.config = config or load_app_config()
+        self.saves_dir: Optional[Path] = (
+            Path(self.config.saves_dir) if self.config.saves_dir else None
+        )
         self.llm = ChatOpenAI(
             model=self.config.llm.model,
             base_url=self.config.llm.base_url,
@@ -200,9 +204,11 @@ class Storyteller:
         llm_messages = [SystemMessage(content=combined_system), *messages]
         llm_with_structure = self.llm.with_structured_output(StoryResponse)
         response = await llm_with_structure.ainvoke(llm_messages)
-        payload: dict = {"node": response.node, "response": response.response}
-        if response.character_id:
-            payload["character_id"] = response.character_id
+        payload: dict = {
+            "node": response.node,
+            "response": response.response,
+            "character_id": response.character_id,
+        }
         json_content = json.dumps(payload, ensure_ascii=False)
         return {"messages": [AIMessage(content=json_content)], "status": None}
 
@@ -392,16 +398,34 @@ class Storyteller:
         result = await self.graph.ainvoke(input_data, config)
         return result
 
+    async def _auto_save(self, result: dict, user_id: str, thread_id: str) -> None:
+        """Persist current state to disk after each turn; silently skips if no story yet."""
+        if not self.saves_dir:
+            return
+        story = coerce_story(result.get("story"))
+        if story is None or story.world is None:
+            return
+        messages = result.get("messages", [])
+        phase = result.get("phase", "world")
+        turn = result.get("turn", 0)
+        try:
+            path = persistence.save_story(story, messages, phase, turn, thread_id, self.saves_dir)
+            logger.debug(f"Auto-saved to {path}")
+        except Exception as e:
+            logger.error(f"Auto-save failed: {e}")
+
     async def tell(self, query: str, user_id: str, thread_id: str = None) -> str:
         # Route resume vs new input from checkpoint truth, not an in-memory flag (avoids stale
         # waiting_for_feedback sending normal story turns as Command(resume) into object_gen).
-        config = {"configurable": {"user_id": user_id, "thread_id": thread_id or user_id}}
+        effective_thread = thread_id or user_id
+        config = {"configurable": {"user_id": user_id, "thread_id": effective_thread}}
         snap = await self.graph.aget_state(config)
         if snap.interrupts:
             logger.info(f"Sending command: {query}")
             result = await self.arun(Command(resume=query), user_id, thread_id)
         else:
             result = await self.arun(query, user_id, thread_id)
+        await self._auto_save(result, user_id, effective_thread)
         interrupts = result.get("__interrupt__")
         self.waiting_for_feedback = bool(interrupts)
         if interrupts:
@@ -410,9 +434,50 @@ class Storyteller:
                 val = first.value if hasattr(first, "value") else first
                 if isinstance(val, dict):
                     text = (val.get("draft") or val.get("hint") or "") or ""
-                    return text.strip() if text.strip() else str(val)
+                    text = strip_thinking(text.strip()) if text.strip() else str(val)
+                    return text if text.strip() else str(val)
                 return str(val) if val is not None else ""
             return str(interrupts)
         messages = result.get("messages", [])
         last_message = messages[-1] if messages else None
-        return getattr(last_message, "content", "") if last_message else ""
+        content = getattr(last_message, "content", "") if last_message else ""
+        return strip_thinking(content)
+
+    async def load(self, save_data: dict, user_id: str, thread_id: str = None) -> None:
+        """Restore a saved session into this Storyteller, replacing in-memory state."""
+        effective_thread = thread_id or user_id
+        story = Story.model_validate(save_data["story"])
+        messages = persistence.reconstruct_messages(save_data.get("messages", []))
+        phase = save_data.get("phase", "world")
+        turn = save_data.get("turn", 0)
+
+        # Fresh checkpointer so no old state bleeds in.
+        self.checkpointer = MemorySaver()
+        self.graph = self.build_graph()
+
+        config = {"configurable": {"user_id": user_id, "thread_id": effective_thread}}
+        await self.graph.aupdate_state(
+            config,
+            {
+                "messages": messages,
+                "story": story,
+                "phase": phase,
+                "turn": turn,
+                "user_id": user_id,
+            },
+        )
+
+        # Rebuild InMemoryStore so the memory agent can look up objects and events.
+        if self.memory_store:
+            namespace_mem = (user_id, "memories")
+            namespace_ev = (user_id, "events")
+            if story.world:
+                wo = WorldObject(world=story.world)
+                self.memory_store.put(namespace_mem, wo.object_id, wo.model_dump())
+            for co in story.characters:
+                self.memory_store.put(namespace_mem, co.object_id, co.model_dump())
+            for ev in story.events:
+                self.memory_store.put(
+                    namespace_ev, str(uuid.uuid4()), {"turn": ev.turn, "event": ev.event}
+                )
+        logger.info(f"Loaded save '{story.title}' (phase={phase}, turn={turn})")

@@ -68,3 +68,6 @@ dmypy.json
 # Logs
 *.log
 logs/
+
+# Saves
+saves/
