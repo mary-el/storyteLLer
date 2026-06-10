@@ -19,7 +19,6 @@ from app.utils import split_thinking
 
 dotenv.load_dotenv()
 
-_BOOTSTRAP = "Begin world creation."
 _USER_ID = "1"
 
 
@@ -188,14 +187,12 @@ def main() -> None:
     st.set_page_config(page_title="storyteLLer", page_icon="📖", layout="wide")
     _init_session()
 
-    # Bootstrap: fire the first message automatically
+    # Show fixed greeting on a fresh session (no LLM call needed).
     if not st.session_state.bootstrapped:
-        with st.spinner("Starting the story…"):
-            raw = _tell(_BOOTSTRAP)
-        text, thinking = _parse_response(raw)
-        if text:
+        greeting = asyncio.run(st.session_state.storyteller.init(_USER_ID, _thread_id()))
+        if greeting:
             st.session_state.messages.append(
-                {"role": "assistant", "content": text, "thinking": thinking}
+                {"role": "assistant", "content": greeting, "thinking": None}
             )
         st.session_state.bootstrapped = True
 

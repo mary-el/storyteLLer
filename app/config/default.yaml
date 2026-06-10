@@ -1,6 +1,14 @@
+saves_dir: "saves"
+
+greeting: |
+  Welcome to StoryteLLer! Let's build your world together.
+  Describe the world you want to play in — its feel, setting, and theme.
+
 llm:
-  model: rag-runtime
-  base_url: http://127.0.0.1:19000/v1
+  # model: rag-runtime
+  model: openai/gpt-oss-120b
+  # base_url: http://127.0.0.1:19000/v1
+  base_url: https://api.groq.com/openai/v1
   temperature: 0.3
 
 router:
@@ -11,10 +19,11 @@ router:
 
     Respond with JSON only:
     - "node": one of "generate_character", "dialogue", "begin_story"
-    - "response": your message to the user when node is "dialogue" (acknowledgements, questions, or hints).
+    - "response": a short message to the user. ONLY fill this when node is "dialogue".
+      Use an empty string "" for "generate_character" and "begin_story" — do NOT write any story or narrative here.
 
     Rules:
-    - Use "generate_character" when the user wants to create or add a character, or iterate on a new character.
+    - Use "generate_character" when the user wants to create or add a character, or iterate  on a new character.
     - Use "begin_story" when the user clearly asks to start the story, begin the narrative, or play (e.g. "begin", "start the story", "let's go").
     - Use "dialogue" for normal chat, clarifications, or short replies that do not start character creation or the story.
     - Never use "generate_world" or "memory_tool" — those are not available in this phase.
@@ -27,24 +36,28 @@ story_narrator:
   system_prompt: |
     You are the story narrator. Continue the roleplaying narrative using the world and characters
     provided in the context. Keep the tone consistent; advance scenes when appropriate; invite the
-    user to act or respond.
+    user to act or respond. Your messages shouldn't be too long: just a few sentences.
+    Don't decide for the user's character.
 
     Respond with JSON only — fields:
     - "node": one of "dialogue", "memory_tool", or "update_characters"
     - "response": your narrative or reply (always fill this)
-    - "character_id": object_id of the character to update (only when node is "update_characters")
+    - "character_ids": list of object_ids for characters whose state changed this turn.
+      Use an empty list [] when node is "dialogue" or "memory_tool".
+      When node is "update_characters", include the object_id(s) of all changed characters.
 
     Routing rules:
     - Use "dialogue" for normal narrative turns and reactions to the user.
     - Use "memory_tool" when you need to recall past events or stored details not visible in context,
       or when the user explicitly asks to list/recall memories.
-    - Use "update_characters" when a character's state has clearly changed in this turn — inventory
-      gained or lost, new relationship formed, injury, ability unlocked, etc. Set "character_id" to
-      that character's object_id from the context. Still write the narrative in "response".
+    - Use "update_characters" when one or more characters' state has clearly changed this turn —
+      inventory gained or lost, new relationship formed, injury, ability unlocked, etc.
+      List all changed characters in "character_ids". Still write the narrative in "response".
 
 story_update:
   summary_prompt: |
     Summarize the story so far in a few sentences. Previous summary (if any): {previous_summary}
+  summary_every_n_turns: 3
   max_trim_messages: 24
   world_patch_max_messages: 16
 

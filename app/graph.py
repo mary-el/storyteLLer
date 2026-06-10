@@ -1,3 +1,4 @@
+import asyncio
 import json
 import uuid
 from pathlib import Path
@@ -34,13 +35,22 @@ from app.utils import logger, strip_thinking
 dotenv.load_dotenv()
 
 
+def _parse_last_json(messages: list) -> dict:
+    """Parse JSON from the last message's content; return {} on any failure."""
+    last = messages[-1] if messages else None
+    try:
+        return json.loads(getattr(last, "content", "{}"))
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        return {}
+
+
 class RouterResponse(BaseModel):
     """Structured response from setup router (world exists; characters until begin)."""
 
     node: Literal["generate_character", "dialogue", "begin_story"] = Field(
         description="Next node: character subgraph, end turn, or enter story phase"
     )
-    response: str = Field(description="User-visible message when node is dialogue or routing hint")
+    response: str = Field(description="User-visible message when node is dialogue")
 
 
 class StoryResponse(BaseModel):
@@ -49,9 +59,13 @@ class StoryResponse(BaseModel):
     node: Literal["memory_tool", "dialogue", "update_characters"] = Field(
         description="Memory lookup, narrative reply, or character state update"
     )
-    response: str = Field(description="Narrative or reply when node is dialogue")
-    character_id: str | None = Field(
-        description="Always include. Use null unless node is update_characters."
+    response: str = Field(description="Narrative or reply (always fill this)")
+    character_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "object_ids of characters whose state changed this turn. "
+            "Empty list unless node is update_characters."
+        ),
     )
 
 
@@ -107,51 +121,35 @@ class Storyteller:
         self.graph = self.build_graph()
         self.waiting_for_feedback = False
 
+    # ── routing ────────────────────────────────────────────────────────────────
+
     def next_after_start(
         self, state: StorytellerState
-    ) -> Literal["generate_world", "router", "story"]:
+    ) -> Literal["greeting", "generate_world", "router", "story"]:
         if state.get("phase") == "story":
             return "story"
         story = coerce_story(state.get("story"))
         if story is None or story.world is None:
+            if not state.get("messages"):
+                return "greeting"
             return "generate_world"
         return "router"
 
     def route_from_router(
         self, state: StorytellerState
     ) -> Literal["generate_character", "begin_story", "dialogue"]:
-        messages = state.get("messages", [])
-        if not messages:
-            return "dialogue"
-        last_message = messages[-1]
-        content = getattr(last_message, "content", "")
-        try:
-            data = json.loads(content)
-            node = data.get("node", "dialogue")
-            if node in ["begin_story", "generate_character"]:
-                return node
-            return "dialogue"
-        except (json.JSONDecodeError, AttributeError, TypeError):
-            logger.warning(f"Failed to parse router JSON: {content!r}")
-            return "dialogue"
+        node = _parse_last_json(state.get("messages", [])).get("node", "dialogue")
+        if node in ("begin_story", "generate_character"):
+            return node
+        return "dialogue"
 
-    def route_from_story(
-        self, state: StorytellerState
-    ) -> Literal["memory_tool", "dialogue", "update_characters"]:
-        messages = state.get("messages", [])
-        if not messages:
-            return "dialogue"
-        last_message = messages[-1]
-        content = getattr(last_message, "content", "")
-        try:
-            data = json.loads(content)
-            node = data.get("node", "dialogue")
-            if node in ("memory_tool", "update_characters"):
-                return node
-            return "dialogue"
-        except (json.JSONDecodeError, AttributeError, TypeError):
-            logger.warning(f"Failed to parse story JSON: {content!r}")
-            return "dialogue"
+    def route_from_story(self, state: StorytellerState) -> Literal["memory_tool", "post_story"]:
+        node = _parse_last_json(state.get("messages", [])).get("node", "dialogue")
+        if node == "memory_tool":
+            return "memory_tool"
+        return "post_story"
+
+    # ── story context ──────────────────────────────────────────────────────────
 
     @staticmethod
     def _story_context_block(story: Story | None) -> str:
@@ -162,9 +160,12 @@ class Storyteller:
             parts.append("World:\n" + story.world.model_dump_json(indent=2))
         for co in story.characters:
             parts.append(f"Character ({co.object_id}):\n" + co.model_dump_json(indent=2))
-        if not parts:
-            return "Story setup in progress."
-        return "\n\n".join(parts)
+        return "\n\n".join(parts) if parts else "Story setup in progress."
+
+    # ── nodes ──────────────────────────────────────────────────────────────────
+
+    def greeting_node(self, state: StorytellerState) -> StorytellerState:
+        return {"messages": [AIMessage(content=self.config.greeting)]}
 
     async def router_node(self, state: StorytellerState) -> StorytellerState:
         messages = trim_messages(
@@ -177,13 +178,12 @@ class Storyteller:
         )
         logger.debug("routing to router")
         prompt = self.router_template.invoke({"conversation": messages})
-        llm_with_structure = self.llm.with_structured_output(RouterResponse)
-        response = await llm_with_structure.ainvoke(prompt)
-        json_content = json.dumps(
-            {"node": response.node, "response": response.response},
-            ensure_ascii=False,
-        )
-        return {"messages": [AIMessage(content=json_content)], "status": None}
+        response = await self.llm.with_structured_output(RouterResponse).ainvoke(prompt)
+        payload = {"node": response.node, "response": response.response}
+        return {
+            "messages": [AIMessage(content=json.dumps(payload, ensure_ascii=False))],
+            "status": None,
+        }
 
     async def story_node(self, state: StorytellerState) -> StorytellerState:
         story = coerce_story(state.get("story"))
@@ -200,77 +200,67 @@ class Storyteller:
             include_system=True,
         )
         logger.debug("routing to story narrator")
-        # Do not pass JSON context through ChatPromptTemplate — `{` in JSON would be parsed as variables.
         llm_messages = [SystemMessage(content=combined_system), *messages]
-        llm_with_structure = self.llm.with_structured_output(StoryResponse)
-        response = await llm_with_structure.ainvoke(llm_messages)
-        payload: dict = {
+        response = await self.llm.with_structured_output(StoryResponse).ainvoke(llm_messages)
+        payload = {
             "node": response.node,
             "response": response.response,
-            "character_id": response.character_id,
+            "character_ids": response.character_ids,
         }
-        json_content = json.dumps(payload, ensure_ascii=False)
-        return {"messages": [AIMessage(content=json_content)], "status": None}
+        return {
+            "messages": [AIMessage(content=json.dumps(payload, ensure_ascii=False))],
+            "status": None,
+        }
 
-    async def update_characters_node(self, state: StorytellerState) -> StorytellerState:
-        """Patch the character identified by the narrator using trustcall extraction."""
-        messages = state.get("messages", [])
-        last_message = messages[-1] if messages else None
-        character_id: str | None = None
-        if last_message:
-            try:
-                data = json.loads(getattr(last_message, "content", "{}"))
-                character_id = data.get("character_id")
-            except (json.JSONDecodeError, AttributeError):
-                pass
-
+    async def _patch_character(self, state: StorytellerState, character_id: str) -> Story | None:
+        """Extract updated state for one character; return a patched Story or None on failure."""
         story = coerce_story(state.get("story"))
-        if not story or not character_id:
-            logger.warning("update_characters_node: no story or character_id")
-            return {}
-
+        if not story:
+            return None
         target = next((c for c in story.characters if c.object_id == character_id), None)
         if target is None:
-            logger.warning(f"update_characters_node: character {character_id!r} not found")
-            return {}
-
-        trimmed = trim_messages(
-            messages,
+            logger.warning(f"_patch_character: {character_id!r} not found")
+            return None
+        messages = trim_messages(
+            state.get("messages", []),
             max_tokens=self.config.story_update.world_patch_max_messages,
             token_counter=len,
             strategy="last",
             start_on="human",
             include_system=False,
         )
+        clean_messages = [
+            (
+                AIMessage(content=_parse_last_json([m]).get("response") or m.content)
+                if isinstance(m, AIMessage)
+                else m
+            )
+            for m in messages
+        ]
         try:
             result = await self.character_extractor.ainvoke(
                 {
-                    "messages": trimmed
+                    "messages": clean_messages
                     + [SystemMessage(content="Update the character based on the story so far.")],
                     "existing": {"Character": target.character.model_dump()},
                 }
             )
-            if result["responses"]:
-                target.character = result["responses"][0]
-                namespace = (state.get("user_id", "default"), "memories")
-                if self.memory_store:
-                    self.memory_store.put(namespace, target.object_id, target)
-                updated_chars = [
-                    target if c.object_id == character_id else c for c in story.characters
-                ]
-                story = story.model_copy(update={"characters": updated_chars})
-                logger.debug(f"Updated character {character_id}")
+            if not result["responses"]:
+                return None
+            target = target.model_copy(update={"character": result["responses"][0]})
+            namespace = (state.get("user_id", "default"), "memories")
+            if self.memory_store:
+                self.memory_store.put(namespace, target.object_id, target)
+            logger.debug(f"_patch_character: updated {character_id}")
+            updated_chars = [target if c.object_id == character_id else c for c in story.characters]
+            return story.model_copy(update={"characters": updated_chars})
         except Exception as e:
-            logger.error(f"update_characters_node failed: {e}")
+            logger.error(f"_patch_character failed for {character_id}: {e}")
+            return None
 
-        return {"story": story}
-
-    async def story_update_node(self, state: StorytellerState) -> StorytellerState:
-        """Extract a key event from the latest turn and update the rolling summary."""
+    async def _update_summary(self, state: StorytellerState) -> tuple[str, int]:
+        """Generate a new rolling summary; return (new_summary, new_turn)."""
         story = coerce_story(state.get("story"))
-        if not story:
-            return {}
-
         turn = (state.get("turn") or 0) + 1
         messages = trim_messages(
             state.get("messages", []),
@@ -280,28 +270,79 @@ class Storyteller:
             start_on="human",
             include_system=False,
         )
+
+        clean_messages = [
+            (
+                AIMessage(content=_parse_last_json([m]).get("response") or m.content)
+                if isinstance(m, AIMessage)
+                else m
+            )
+            for m in messages
+        ]
         summary_prompt = self.config.story_update.summary_prompt.format(
-            previous_summary=story.summary or "None"
+            previous_summary=story.summary if story else "None"
         )
         try:
-            response = await self.llm.ainvoke(messages + [SystemMessage(content=summary_prompt)])
-            new_summary = response.content.strip()
+            response = await self.llm.ainvoke(
+                clean_messages + [SystemMessage(content=summary_prompt)]
+            )
+            return response.content.strip(), turn
         except Exception as e:
-            logger.error(f"story_update_node summary failed: {e}")
-            new_summary = story.summary
+            logger.error(f"_update_summary failed: {e}")
+            return (story.summary if story else ""), turn
 
-        event = StoryEvent(turn=turn, event=new_summary)
-        user_id = state.get("user_id", "default")
-        if self.memory_store:
-            self.memory_store.put(
-                (user_id, "events"), str(uuid.uuid4()), {"turn": turn, "event": new_summary}
+    async def post_story_node(self, state: StorytellerState) -> StorytellerState:
+        """Run summary update (every N turns) + all character patches concurrently, then merge."""
+        story = coerce_story(state.get("story"))
+        if not story:
+            return {}
+
+        character_ids: list[str] = _parse_last_json(state.get("messages", [])).get(
+            "character_ids", []
+        )
+        new_turn = (state.get("turn") or 0) + 1
+        every_n = self.config.story_update.summary_every_n_turns
+        run_summary = new_turn % every_n == 0
+
+        # Fan out: summary (every N turns) alongside one patch coroutine per changed character.
+        coros = ([self._update_summary(state)] if run_summary else []) + [
+            self._patch_character(state, cid) for cid in character_ids
+        ]
+        results = await asyncio.gather(*coros, return_exceptions=True) if coros else []
+
+        if run_summary:
+            summary_result, *character_results = results
+            if isinstance(summary_result, BaseException):
+                logger.error(f"post_story_node summary failed: {summary_result}")
+                new_summary = story.summary
+            else:
+                new_summary, new_turn = summary_result
+            event = StoryEvent(turn=new_turn, event=new_summary)
+            user_id = state.get("user_id", "default")
+            if self.memory_store:
+                self.memory_store.put(
+                    (user_id, "events"), str(uuid.uuid4()), {"turn": new_turn, "event": new_summary}
+                )
+            story = story.model_copy(
+                update={"summary": new_summary, "events": [*story.events, event]}
+            )
+        else:
+            character_results = list(results)
+
+        # Merge each successfully patched character back into the story.
+        for char_result in character_results:
+            if isinstance(char_result, BaseException) or char_result is None:
+                continue
+            patched = {c.object_id: c for c in char_result.characters}
+            story = story.model_copy(
+                update={"characters": [patched.get(c.object_id, c) for c in story.characters]}
             )
 
-        updated_story = story.model_copy(
-            update={"summary": new_summary, "events": [*story.events, event]}
+        n_updated = sum(1 for r in character_results if r and not isinstance(r, BaseException))
+        logger.debug(
+            f"post_story_node: turn={new_turn}, summary_updated={run_summary}, characters_updated={n_updated}"
         )
-        logger.debug(f"story_update_node: turn={turn} summary updated")
-        return {"story": updated_story, "turn": turn}
+        return {"story": story, "turn": new_turn}
 
     def enter_story(self, state: StorytellerState) -> StorytellerState:
         return {"phase": "story"}
@@ -331,30 +372,34 @@ class Storyteller:
             "phase": phase,
         }
 
-    def build_graph(self):
-        graph = StateGraph(StorytellerState)
+    # ── graph construction ─────────────────────────────────────────────────────
 
+    def _add_nodes(self, graph: StateGraph) -> None:
+        graph.add_node("greeting", self.greeting_node)
         graph.add_node("router", self.router_node)
         graph.add_node("story", self.story_node)
         graph.add_node("enter_story", self.enter_story)
         graph.add_node("memory_tool", self.memory_agent.graph)
-        graph.add_node("update_characters", self.update_characters_node)
-        graph.add_node("story_update", self.story_update_node)
-
+        graph.add_node("post_story", self.post_story_node)
         graph.add_node("generate_character", self.character_generator.graph)
         graph.add_node("generate_world", self.world_generator.graph)
         graph.add_node("finalize_object", self.finalize_object)
 
+    def _add_setup_phase_edges(self, graph: StateGraph) -> None:
         graph.add_conditional_edges(
             START,
             self.next_after_start,
             {
+                "greeting": "greeting",
                 "generate_world": "generate_world",
                 "router": "router",
                 "story": "story",
             },
         )
-
+        graph.add_edge("greeting", END)
+        graph.add_edge("generate_world", "finalize_object")
+        graph.add_edge("generate_character", "finalize_object")
+        graph.add_edge("finalize_object", "router")
         graph.add_conditional_edges(
             "router",
             self.route_from_router,
@@ -364,39 +409,46 @@ class Storyteller:
                 "dialogue": END,
             },
         )
-
         graph.add_edge("enter_story", "story")
 
+    def _add_story_phase_edges(self, graph: StateGraph) -> None:
         graph.add_conditional_edges(
             "story",
             self.route_from_story,
             {
                 "memory_tool": "memory_tool",
-                "dialogue": "story_update",
-                "update_characters": "update_characters",
+                "post_story": "post_story",
             },
         )
-
-        graph.add_edge("update_characters", "story_update")
-        graph.add_edge("story_update", END)
-
-        graph.add_edge("generate_character", "finalize_object")
-        graph.add_edge("generate_world", "finalize_object")
-        graph.add_edge("finalize_object", "router")
-        # End after memory so the list/get reply stays the last message; next user turn goes START → story.
         graph.add_edge("memory_tool", END)
+        graph.add_edge("post_story", END)
 
+    def build_graph(self):
+        graph = StateGraph(StorytellerState)
+        self._add_nodes(graph)
+        self._add_setup_phase_edges(graph)
+        self._add_story_phase_edges(graph)
         return graph.compile(checkpointer=self.checkpointer)
 
+    # ── public API ─────────────────────────────────────────────────────────────
+
+    async def init(self, user_id: str, thread_id: str = None) -> str:
+        """Emit the fixed greeting for a fresh session; must be called before the first tell()."""
+        effective_thread = thread_id or user_id
+        config = {"configurable": {"user_id": user_id, "thread_id": effective_thread}}
+        result = await self.graph.ainvoke({"user_id": user_id}, config)
+        messages = result.get("messages", [])
+        last = messages[-1] if messages else None
+        return strip_thinking(getattr(last, "content", "")) if last else ""
+
     async def arun(self, query: str | Command, user_id: str, thread_id: str = None) -> dict:
-        """Run the storyteller asynchronously"""
+        """Invoke the graph with a user message or a resume Command."""
         if isinstance(query, Command):
             input_data = query
         else:
             input_data = {"messages": [HumanMessage(content=query)], "user_id": user_id}
         config = {"configurable": {"user_id": user_id, "thread_id": thread_id or user_id}}
-        result = await self.graph.ainvoke(input_data, config)
-        return result
+        return await self.graph.ainvoke(input_data, config)
 
     async def _auto_save(self, result: dict, user_id: str, thread_id: str) -> None:
         """Persist current state to disk after each turn; silently skips if no story yet."""
@@ -415,8 +467,8 @@ class Storyteller:
             logger.error(f"Auto-save failed: {e}")
 
     async def tell(self, query: str, user_id: str, thread_id: str = None) -> str:
-        # Route resume vs new input from checkpoint truth, not an in-memory flag (avoids stale
-        # waiting_for_feedback sending normal story turns as Command(resume) into object_gen).
+        # Check checkpoint for pending interrupts — avoids stale in-memory flag sending
+        # normal story turns as Command(resume) into the object generator subgraph.
         effective_thread = thread_id or user_id
         config = {"configurable": {"user_id": user_id, "thread_id": effective_thread}}
         snap = await self.graph.aget_state(config)

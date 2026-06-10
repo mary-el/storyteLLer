@@ -11,9 +11,6 @@ from app import persistence
 from app.graph import Storyteller
 from app.utils import split_thinking
 
-# Synthetic first user line so world gen runs immediately; avoids an extra turn before any draft.
-_BOOTSTRAP_MESSAGE = "Begin world creation."
-
 
 def _print_message(message: str) -> None:
     print("\n--- Model Response ---")
@@ -97,11 +94,9 @@ async def interactive_conversation(storyteller: Storyteller, user_id: str) -> No
     print("\n=== Interactive Storyteller ===")
     print("Type 'exit', 'quit', or 'done' to finish.")
     print("Type '/load' to resume a saved world.\n")
-    _print_message(
-        "I am a storyteller. Let's create a story together. "
-        "We'll start by creating a world — the first assistant reply is triggered automatically."
-    )
-    await process_single_message(storyteller, _BOOTSTRAP_MESSAGE, user_id)
+    greeting = await storyteller.init(user_id)
+    if greeting:
+        _print_message(greeting)
 
     while True:
         try:

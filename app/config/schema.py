@@ -29,6 +29,9 @@ class StoryUpdateConfig(BaseModel):
     summary_prompt: str = Field(
         description="System message for rolling summary; may use {previous_summary}"
     )
+    summary_every_n_turns: int = Field(
+        default=3, ge=1, description="Generate a new summary only every N story turns."
+    )
     max_trim_messages: int = Field(default=24, ge=1)
     world_patch_max_messages: int = Field(default=16, ge=1)
 
@@ -57,6 +60,10 @@ class MemoryAgentConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
+    greeting: str = Field(
+        default="Welcome to StoryteLLer! Let's build your world. Describe the setting you want to play in.",
+        description="Fixed opening message shown to the user on a fresh session (no LLM call).",
+    )
     llm: LLMConfig
     router: RouterConfig
     story_narrator: StoryNarratorConfig
