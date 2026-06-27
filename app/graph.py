@@ -24,24 +24,14 @@ from app.state.schemas import (
     Character,
     CharacterObject,
     Story,
-    StoryEvent,
     StoryStep,
     StorytellerState,
     WorldObject,
     coerce_story,
 )
-from app.utils import logger, strip_thinking
+from app.utils import logger, message_text, parse_last_json, strip_thinking, visible_response
 
 dotenv.load_dotenv()
-
-
-def _parse_last_json(messages: list) -> dict:
-    """Parse JSON from the last message's content; return {} on any failure."""
-    last = messages[-1] if messages else None
-    try:
-        return json.loads(getattr(last, "content", "{}"))
-    except (json.JSONDecodeError, AttributeError, TypeError):
-        return {}
 
 
 class RouterResponse(BaseModel):
@@ -51,6 +41,17 @@ class RouterResponse(BaseModel):
         description="Next node: character subgraph, end turn, or enter story phase"
     )
     response: str = Field(description="User-visible message when node is dialogue")
+
+
+class SummaryResponse(BaseModel):
+    """Structured rolling summary of the story transcript."""
+
+    summary: str = Field(
+        description=(
+            "A neutral 2-5 sentence summary of the story so far. "
+            "Include only events from the transcript; do not add new information or continue the narrative."
+        )
+    )
 
 
 class StoryResponse(BaseModel):
@@ -138,16 +139,16 @@ class Storyteller:
     def route_from_router(
         self, state: StorytellerState
     ) -> Literal["generate_character", "begin_story", "dialogue"]:
-        node = _parse_last_json(state.get("messages", [])).get("node", "dialogue")
+        node = parse_last_json(state.get("messages", [])).get("node", "dialogue")
         if node in ("begin_story", "generate_character"):
             return node
         return "dialogue"
 
-    def route_from_story(self, state: StorytellerState) -> Literal["memory_tool", "post_story"]:
-        node = _parse_last_json(state.get("messages", [])).get("node", "dialogue")
+    def route_from_story(self, state: StorytellerState) -> Literal["memory_tool"] | list[str]:
+        node = parse_last_json(state.get("messages", [])).get("node", "dialogue")
         if node == "memory_tool":
             return "memory_tool"
-        return "post_story"
+        return ["summary", "post_story"]
 
     # ── story context ──────────────────────────────────────────────────────────
 
@@ -230,12 +231,7 @@ class Storyteller:
             include_system=False,
         )
         clean_messages = [
-            (
-                AIMessage(content=_parse_last_json([m]).get("response") or m.content)
-                if isinstance(m, AIMessage)
-                else m
-            )
-            for m in messages
+            AIMessage(content=message_text(m)) if isinstance(m, AIMessage) else m for m in messages
         ]
         try:
             result = await self.character_extractor.ainvoke(
@@ -258,10 +254,12 @@ class Storyteller:
             logger.error(f"_patch_character failed for {character_id}: {e}")
             return None
 
-    async def _update_summary(self, state: StorytellerState) -> tuple[str, int]:
-        """Generate a new rolling summary; return (new_summary, new_turn)."""
+    async def summary_node(self, state: StorytellerState) -> StorytellerState:
+        """Generate a new rolling summary when due; stored in _turn_summary for finalize_turn."""
         story = coerce_story(state.get("story"))
         turn = (state.get("turn") or 0) + 1
+        if turn % self.config.story_update.summary_every_n_turns != 0:
+            return {}
         messages = trim_messages(
             state.get("messages", []),
             max_tokens=self.config.story_update.max_trim_messages,
@@ -271,63 +269,46 @@ class Storyteller:
             include_system=False,
         )
 
-        clean_messages = [
-            (
-                AIMessage(content=_parse_last_json([m]).get("response") or m.content)
-                if isinstance(m, AIMessage)
-                else m
-            )
-            for m in messages
-        ]
+        transcript_lines: list[str] = []
+        for m in messages:
+            text = message_text(m).strip()
+            if not text:
+                continue
+            role = "User" if isinstance(m, HumanMessage) else "Narrator"
+            transcript_lines.append(f"{role}: {text}")
+        transcript = "\n".join(transcript_lines)
+
         summary_prompt = self.config.story_update.summary_prompt.format(
-            previous_summary=story.summary if story else "None"
+            previous_summary=story.summary if story else "None",
+            transcript=transcript,
         )
+        logger.debug(f"summary_node: summary_prompt: {summary_prompt}")
         try:
-            response = await self.llm.ainvoke(
-                clean_messages + [SystemMessage(content=summary_prompt)]
+            response = await self.llm.with_structured_output(SummaryResponse).ainvoke(
+                [
+                    SystemMessage(content=summary_prompt),
+                ]
             )
-            return response.content.strip(), turn
+            logger.debug(f"summary_node: response: {response.summary.strip()}")
+            return {"_turn_summary": response.summary.strip()}
         except Exception as e:
-            logger.error(f"_update_summary failed: {e}")
-            return (story.summary if story else ""), turn
+            logger.error(f"summary_node failed: {e}")
+            return {}
 
     async def post_story_node(self, state: StorytellerState) -> StorytellerState:
-        """Run summary update (every N turns) + all character patches concurrently, then merge."""
+        """Patch changed characters and increment turn."""
         story = coerce_story(state.get("story"))
         if not story:
             return {}
 
-        character_ids: list[str] = _parse_last_json(state.get("messages", [])).get(
+        character_ids: list[str] = parse_last_json(state.get("messages", [])).get(
             "character_ids", []
         )
         new_turn = (state.get("turn") or 0) + 1
-        every_n = self.config.story_update.summary_every_n_turns
-        run_summary = new_turn % every_n == 0
 
-        # Fan out: summary (every N turns) alongside one patch coroutine per changed character.
-        coros = ([self._update_summary(state)] if run_summary else []) + [
-            self._patch_character(state, cid) for cid in character_ids
-        ]
+        coros = [self._patch_character(state, cid) for cid in character_ids]
         results = await asyncio.gather(*coros, return_exceptions=True) if coros else []
-
-        if run_summary:
-            summary_result, *character_results = results
-            if isinstance(summary_result, BaseException):
-                logger.error(f"post_story_node summary failed: {summary_result}")
-                new_summary = story.summary
-            else:
-                new_summary, new_turn = summary_result
-            event = StoryEvent(turn=new_turn, event=new_summary)
-            user_id = state.get("user_id", "default")
-            if self.memory_store:
-                self.memory_store.put(
-                    (user_id, "events"), str(uuid.uuid4()), {"turn": new_turn, "event": new_summary}
-                )
-            story = story.model_copy(
-                update={"summary": new_summary, "events": [*story.events, event]}
-            )
-        else:
-            character_results = list(results)
+        character_results = list(results)
 
         # Merge each successfully patched character back into the story.
         for char_result in character_results:
@@ -339,10 +320,20 @@ class Storyteller:
             )
 
         n_updated = sum(1 for r in character_results if r and not isinstance(r, BaseException))
-        logger.debug(
-            f"post_story_node: turn={new_turn}, summary_updated={run_summary}, characters_updated={n_updated}"
-        )
+        logger.debug(f"post_story_node: turn={new_turn}, characters_updated={n_updated}")
         return {"story": story, "turn": new_turn}
+
+    def finalize_turn_node(self, state: StorytellerState) -> StorytellerState:
+        """Fan-in: merge _turn_summary into story after parallel summary + post_story."""
+        turn_summary = state.get("_turn_summary")
+        if not turn_summary:
+            return {}
+        story = coerce_story(state.get("story"))
+        if not story:
+            return {"_turn_summary": None}
+        story = story.model_copy(update={"summary": turn_summary})
+        logger.debug("finalize_turn_node: merged _turn_summary into story.summary")
+        return {"story": story, "_turn_summary": None}
 
     def enter_story(self, state: StorytellerState) -> StorytellerState:
         return {"phase": "story"}
@@ -384,6 +375,8 @@ class Storyteller:
         graph.add_node("generate_character", self.character_generator.graph)
         graph.add_node("generate_world", self.world_generator.graph)
         graph.add_node("finalize_object", self.finalize_object)
+        graph.add_node("summary", self.summary_node)
+        graph.add_node("finalize_turn", self.finalize_turn_node)
 
     def _add_setup_phase_edges(self, graph: StateGraph) -> None:
         graph.add_conditional_edges(
@@ -415,13 +408,12 @@ class Storyteller:
         graph.add_conditional_edges(
             "story",
             self.route_from_story,
-            {
-                "memory_tool": "memory_tool",
-                "post_story": "post_story",
-            },
+            ["memory_tool", "summary", "post_story"],
         )
         graph.add_edge("memory_tool", END)
-        graph.add_edge("post_story", END)
+        graph.add_edge("summary", "finalize_turn")
+        graph.add_edge("post_story", "finalize_turn")
+        graph.add_edge("finalize_turn", END)
 
     def build_graph(self):
         graph = StateGraph(StorytellerState)
@@ -437,9 +429,7 @@ class Storyteller:
         effective_thread = thread_id or user_id
         config = {"configurable": {"user_id": user_id, "thread_id": effective_thread}}
         result = await self.graph.ainvoke({"user_id": user_id}, config)
-        messages = result.get("messages", [])
-        last = messages[-1] if messages else None
-        return strip_thinking(getattr(last, "content", "")) if last else ""
+        return visible_response(result.get("messages", []))
 
     async def arun(self, query: str | Command, user_id: str, thread_id: str = None) -> dict:
         """Invoke the graph with a user message or a resume Command."""
@@ -490,10 +480,7 @@ class Storyteller:
                     return text if text.strip() else str(val)
                 return str(val) if val is not None else ""
             return str(interrupts)
-        messages = result.get("messages", [])
-        last_message = messages[-1] if messages else None
-        content = getattr(last_message, "content", "") if last_message else ""
-        return strip_thinking(content)
+        return visible_response(result.get("messages", []))
 
     async def load(self, save_data: dict, user_id: str, thread_id: str = None) -> None:
         """Restore a saved session into this Storyteller, replacing in-memory state."""

@@ -9,6 +9,7 @@ dependencies = [
     "langchain>=0.3.25",
     "langchain-openai>=1.2.2",
     "langgraph>=1.0.4",
+    "langgraph-cli[inmem]>=0.4.30",
     "loguru>=0.7.0",
     "pre-commit>=3.6.0",
     "pydantic>=2.10.0",

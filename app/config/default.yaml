@@ -56,9 +56,14 @@ story_narrator:
 
 story_update:
   summary_prompt: |
-    Summarize the story so far in a few sentences. Previous summary (if any): {previous_summary}
+    You are a story summarizer, NOT the narrator. Do not continue the story or write dialogue.
+    Summarize the story so far based on the transcript in the user message.
+    Previous summary (if any): {previous_summary}
+    Write a neutral 2-5 sentence summary. Include only events already in the transcript.
+    The transcript:
+    {transcript}
   summary_every_n_turns: 3
-  max_trim_messages: 24
+  max_trim_messages: 7
   world_patch_max_messages: 16
 
 object_generator:

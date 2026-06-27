@@ -1,6 +1,8 @@
+import json
 import re
 import sys
 
+from langchain_core.messages import AIMessage
 from loguru import logger
 
 LOGFILE = "logfile.log"
@@ -47,3 +49,38 @@ def split_thinking(text: str) -> tuple[str | None, str]:
 
 def strip_thinking(text: str) -> str:
     return _RE.sub("", text).strip() if isinstance(text, str) else (str(text) if text else "")
+
+
+def parse_last_json(messages: list) -> dict:
+    """Parse JSON from the last message's content; return {} on any failure."""
+    last = messages[-1] if messages else None
+    try:
+        return json.loads(getattr(last, "content", "{}"))
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        return {}
+
+
+def message_text(msg) -> str:
+    """Extract plain text from a message (JSON wire-format AIMessages use response field)."""
+    if isinstance(msg, AIMessage):
+        payload = parse_last_json([msg])
+        if "response" in payload:
+            return payload["response"] or ""
+        return getattr(msg, "content", "") or ""
+    return getattr(msg, "content", "") or ""
+
+
+def visible_response(messages: list) -> str:
+    """Extract user-visible text from the last AIMessage (JSON wire format or plain)."""
+    for msg in reversed(messages):
+        if not isinstance(msg, AIMessage):
+            continue
+        content = getattr(msg, "content", "") or ""
+        try:
+            payload = json.loads(content)
+            if isinstance(payload, dict) and payload.get("response"):
+                return strip_thinking(payload["response"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return strip_thinking(content)
+    return ""

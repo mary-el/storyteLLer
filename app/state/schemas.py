@@ -20,6 +20,7 @@ class Character(BaseModel):
     abilities: str = Field("Unknown", description="The abilities of the character")
     inventory: str = Field("Empty", description="The inventory of the character")
     relationships: str = Field("Unknown", description="The relationships of the character")
+    state: str = Field("Unknown", description="Current state of the character")
 
 
 class World(BaseModel):
@@ -59,7 +60,7 @@ class Story(BaseModel):
     title: str = Field("Untitled")
     world: Optional[World] = None
     characters: list[CharacterObject] = Field(default_factory=list)
-    summary: str = Field("")
+    summary: str = Field("None")
     events: list[StoryEvent] = Field(default_factory=list)
 
 
@@ -88,3 +89,4 @@ class StorytellerState(State):
     story: NotRequired[Story]
     phase: NotRequired[StoryStep]
     turn: NotRequired[int]
+    _turn_summary: NotRequired[str]  # written by summary_node, merged by finalize_turn
