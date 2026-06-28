@@ -26,7 +26,6 @@ router:
     - Use "generate_character" when the user wants to create or add a character, or iterate  on a new character.
     - Use "begin_story" when the user clearly asks to start the story, begin the narrative, or play (e.g. "begin", "start the story", "let's go").
     - Use "dialogue" for normal chat, clarifications, or short replies that do not start character creation or the story.
-    - Never use "generate_world" or "memory_tool" — those are not available in this phase.
 
     If the latest message is a system event "SYSTEM_EVENT: OBJECT_CREATED", acknowledge the created object
     briefly and ask what they want next (another character or to begin the story).

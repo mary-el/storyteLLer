@@ -148,7 +148,7 @@ class Storyteller:
         node = parse_last_json(state.get("messages", [])).get("node", "dialogue")
         if node == "memory_tool":
             return "memory_tool"
-        return ["summary", "post_story"]
+        return ["summary", "update_characters"]
 
     # ── story context ──────────────────────────────────────────────────────────
 
@@ -295,8 +295,8 @@ class Storyteller:
             logger.error(f"summary_node failed: {e}")
             return {}
 
-    async def post_story_node(self, state: StorytellerState) -> StorytellerState:
-        """Patch changed characters and increment turn."""
+    async def update_characters_node(self, state: StorytellerState) -> StorytellerState:
+        """Patch changed characters."""
         story = coerce_story(state.get("story"))
         if not story:
             return {}
@@ -304,7 +304,6 @@ class Storyteller:
         character_ids: list[str] = parse_last_json(state.get("messages", [])).get(
             "character_ids", []
         )
-        new_turn = (state.get("turn") or 0) + 1
 
         coros = [self._patch_character(state, cid) for cid in character_ids]
         results = await asyncio.gather(*coros, return_exceptions=True) if coros else []
@@ -320,20 +319,22 @@ class Storyteller:
             )
 
         n_updated = sum(1 for r in character_results if r and not isinstance(r, BaseException))
-        logger.debug(f"post_story_node: turn={new_turn}, characters_updated={n_updated}")
-        return {"story": story, "turn": new_turn}
+        logger.debug(f"update_characters_node: characters_updated={n_updated}")
+        return {"story": story}
 
     def finalize_turn_node(self, state: StorytellerState) -> StorytellerState:
-        """Fan-in: merge _turn_summary into story after parallel summary + post_story."""
+        """Fan-in: merge _turn_summary into story after parallel summary + update_characters,
+        increment turn"""
         turn_summary = state.get("_turn_summary")
+        turn = (state.get("turn") or 0) + 1
         if not turn_summary:
-            return {}
+            return {"turn": turn}
         story = coerce_story(state.get("story"))
         if not story:
-            return {"_turn_summary": None}
+            return {"_turn_summary": None, "turn": turn}
         story = story.model_copy(update={"summary": turn_summary})
         logger.debug("finalize_turn_node: merged _turn_summary into story.summary")
-        return {"story": story, "_turn_summary": None}
+        return {"story": story, "_turn_summary": None, "turn": turn}
 
     def enter_story(self, state: StorytellerState) -> StorytellerState:
         return {"phase": "story"}
@@ -371,7 +372,7 @@ class Storyteller:
         graph.add_node("story", self.story_node)
         graph.add_node("enter_story", self.enter_story)
         graph.add_node("memory_tool", self.memory_agent.graph)
-        graph.add_node("post_story", self.post_story_node)
+        graph.add_node("update_characters", self.update_characters_node)
         graph.add_node("generate_character", self.character_generator.graph)
         graph.add_node("generate_world", self.world_generator.graph)
         graph.add_node("finalize_object", self.finalize_object)
@@ -408,11 +409,11 @@ class Storyteller:
         graph.add_conditional_edges(
             "story",
             self.route_from_story,
-            ["memory_tool", "summary", "post_story"],
+            ["memory_tool", "summary", "update_characters"],
         )
         graph.add_edge("memory_tool", END)
         graph.add_edge("summary", "finalize_turn")
-        graph.add_edge("post_story", "finalize_turn")
+        graph.add_edge("update_characters", "finalize_turn")
         graph.add_edge("finalize_turn", END)
 
     def build_graph(self):
