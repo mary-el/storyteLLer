@@ -90,3 +90,4 @@ class StorytellerState(State):
     phase: NotRequired[StoryStep]
     turn: NotRequired[int]
     _turn_summary: NotRequired[str]  # written by summary_node, merged by finalize_turn
+    _turn_title: NotRequired[str]  # written by summary_node, merged by finalize_turn

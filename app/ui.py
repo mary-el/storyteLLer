@@ -15,7 +15,7 @@ from langgraph.store.memory import InMemoryStore
 from app import persistence
 from app.graph import Storyteller
 from app.state.schemas import coerce_story
-from app.utils import split_thinking
+from app.utils import STRUCTURED_OUTPUT_ERROR, logger, split_thinking
 
 dotenv.load_dotenv()
 
@@ -217,7 +217,12 @@ def main() -> None:
 
         with st.chat_message("assistant"):
             with st.spinner("Narrating…"):
-                raw = _tell(user_input)
+                try:
+                    raw = _tell(user_input)
+                except Exception as e:
+                    logger.error(f"UI tell failed: {e}")
+                    st.error(STRUCTURED_OUTPUT_ERROR)
+                    raw = STRUCTURED_OUTPUT_ERROR
             text, thinking = _parse_response(raw)
             _render_assistant_message(text, thinking)
 

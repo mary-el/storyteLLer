@@ -1,9 +1,15 @@
 import json
 import re
 import sys
+from typing import TypeVar
 
 from langchain_core.messages import AIMessage
 from loguru import logger
+from pydantic import BaseModel
+
+STRUCTURED_OUTPUT_ERROR = "Sorry, the narrator failed to respond. Please try again."
+
+T = TypeVar("T", bound=BaseModel)
 
 LOGFILE = "logfile.log"
 FORMAT = (
@@ -68,6 +74,25 @@ def message_text(msg) -> str:
             return payload["response"] or ""
         return getattr(msg, "content", "") or ""
     return getattr(msg, "content", "") or ""
+
+
+async def invoke_structured(
+    llm,
+    schema: type[T],
+    messages,
+    *,
+    retries: int = 1,
+) -> T:
+    """Call with_structured_output with retries; re-raise on failure."""
+    structured = llm.with_structured_output(schema)
+    last_error: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            return await structured.ainvoke(messages)
+        except Exception as e:
+            last_error = e
+            logger.error(f"Structured output failed (attempt {attempt + 1}/{retries + 1}): {e}")
+    raise last_error  # type: ignore[misc]
 
 
 def visible_response(messages: list) -> str:

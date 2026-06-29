@@ -1,12 +1,6 @@
 from pydantic import BaseModel, Field
 
 
-class LLMConfig(BaseModel):
-    model: str = Field(description="OpenAI-compatible model name")
-    base_url: str = Field(description="API base URL")
-    temperature: float = 0.3
-
-
 class RouterConfig(BaseModel):
     """Setup phase: characters until the user begins the story."""
 
@@ -64,7 +58,7 @@ class AppConfig(BaseModel):
         default="Welcome to StoryteLLer! Let's build your world. Describe the setting you want to play in.",
         description="Fixed opening message shown to the user on a fresh session (no LLM call).",
     )
-    llm: LLMConfig
+    llm: dict = Field(description="OpenAI-compatible model config", default_factory=dict)
     router: RouterConfig
     story_narrator: StoryNarratorConfig
     story_update: StoryUpdateConfig

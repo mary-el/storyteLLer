@@ -29,7 +29,15 @@ from app.state.schemas import (
     WorldObject,
     coerce_story,
 )
-from app.utils import logger, message_text, parse_last_json, strip_thinking, visible_response
+from app.utils import (
+    STRUCTURED_OUTPUT_ERROR,
+    invoke_structured,
+    logger,
+    message_text,
+    parse_last_json,
+    strip_thinking,
+    visible_response,
+)
 
 dotenv.load_dotenv()
 
@@ -51,6 +59,10 @@ class SummaryResponse(BaseModel):
             "A neutral 2-5 sentence summary of the story so far. "
             "Include only events from the transcript; do not add new information or continue the narrative."
         )
+    )
+    title: str = Field(
+        description="A title for the story so far. It must be short and enthralling.",
+        default="Untitled",
     )
 
 
@@ -81,11 +93,7 @@ class Storyteller:
         self.saves_dir: Optional[Path] = (
             Path(self.config.saves_dir) if self.config.saves_dir else None
         )
-        self.llm = ChatOpenAI(
-            model=self.config.llm.model,
-            base_url=self.config.llm.base_url,
-            temperature=self.config.llm.temperature,
-        )
+        self.llm = ChatOpenAI(**self.config.llm)
         self.checkpointer = MemorySaver() if not langdev else None
         self.memory_store = memory_store
         self.langdev = langdev
@@ -179,7 +187,11 @@ class Storyteller:
         )
         logger.debug("routing to router")
         prompt = self.router_template.invoke({"conversation": messages})
-        response = await self.llm.with_structured_output(RouterResponse).ainvoke(prompt)
+        try:
+            response = await invoke_structured(self.llm, RouterResponse, prompt)
+        except Exception as e:
+            logger.error(f"router_node failed: {e}")
+            response = RouterResponse(node="dialogue", response=STRUCTURED_OUTPUT_ERROR)
         payload = {"node": response.node, "response": response.response}
         return {
             "messages": [AIMessage(content=json.dumps(payload, ensure_ascii=False))],
@@ -202,7 +214,13 @@ class Storyteller:
         )
         logger.debug("routing to story narrator")
         llm_messages = [SystemMessage(content=combined_system), *messages]
-        response = await self.llm.with_structured_output(StoryResponse).ainvoke(llm_messages)
+        try:
+            response = await invoke_structured(self.llm, StoryResponse, llm_messages)
+        except Exception as e:
+            logger.error(f"story_node failed: {e}")
+            response = StoryResponse(
+                node="dialogue", response=STRUCTURED_OUTPUT_ERROR, character_ids=[]
+            )
         payload = {
             "node": response.node,
             "response": response.response,
@@ -279,18 +297,15 @@ class Storyteller:
         transcript = "\n".join(transcript_lines)
 
         summary_prompt = self.config.story_update.summary_prompt.format(
-            previous_summary=story.summary if story else "None",
-            transcript=transcript,
+            previous_summary=story.summary, transcript=transcript, title=story.title
         )
-        logger.debug(f"summary_node: summary_prompt: {summary_prompt}")
         try:
-            response = await self.llm.with_structured_output(SummaryResponse).ainvoke(
+            response = await self.llm.with_structured_output(SummaryResponse, strict=False).ainvoke(
                 [
                     SystemMessage(content=summary_prompt),
                 ]
             )
-            logger.debug(f"summary_node: response: {response.summary.strip()}")
-            return {"_turn_summary": response.summary.strip()}
+            return {"_turn_summary": response.summary.strip(), "_turn_title": response.title}
         except Exception as e:
             logger.error(f"summary_node failed: {e}")
             return {}
@@ -326,15 +341,16 @@ class Storyteller:
         """Fan-in: merge _turn_summary into story after parallel summary + update_characters,
         increment turn"""
         turn_summary = state.get("_turn_summary")
+        turn_title = state.get("_turn_title")
         turn = (state.get("turn") or 0) + 1
         if not turn_summary:
             return {"turn": turn}
         story = coerce_story(state.get("story"))
         if not story:
-            return {"_turn_summary": None, "turn": turn}
-        story = story.model_copy(update={"summary": turn_summary})
+            return {"_turn_summary": None, "_turn_title": None, "turn": turn}
+        story = story.model_copy(update={"summary": turn_summary, "title": turn_title})
         logger.debug("finalize_turn_node: merged _turn_summary into story.summary")
-        return {"story": story, "_turn_summary": None, "turn": turn}
+        return {"story": story, "_turn_summary": None, "_turn_title": None, "turn": turn}
 
     def enter_story(self, state: StorytellerState) -> StorytellerState:
         return {"phase": "story"}
@@ -462,26 +478,30 @@ class Storyteller:
         # normal story turns as Command(resume) into the object generator subgraph.
         effective_thread = thread_id or user_id
         config = {"configurable": {"user_id": user_id, "thread_id": effective_thread}}
-        snap = await self.graph.aget_state(config)
-        if snap.interrupts:
-            logger.info(f"Sending command: {query}")
-            result = await self.arun(Command(resume=query), user_id, thread_id)
-        else:
-            result = await self.arun(query, user_id, thread_id)
-        await self._auto_save(result, user_id, effective_thread)
-        interrupts = result.get("__interrupt__")
-        self.waiting_for_feedback = bool(interrupts)
-        if interrupts:
-            if isinstance(interrupts, list) and interrupts:
-                first = interrupts[0]
-                val = first.value if hasattr(first, "value") else first
-                if isinstance(val, dict):
-                    text = (val.get("draft") or val.get("hint") or "") or ""
-                    text = strip_thinking(text.strip()) if text.strip() else str(val)
-                    return text if text.strip() else str(val)
-                return str(val) if val is not None else ""
-            return str(interrupts)
-        return visible_response(result.get("messages", []))
+        try:
+            snap = await self.graph.aget_state(config)
+            if snap.interrupts:
+                logger.info(f"Sending command: {query}")
+                result = await self.arun(Command(resume=query), user_id, thread_id)
+            else:
+                result = await self.arun(query, user_id, thread_id)
+            await self._auto_save(result, user_id, effective_thread)
+            interrupts = result.get("__interrupt__")
+            self.waiting_for_feedback = bool(interrupts)
+            if interrupts:
+                if isinstance(interrupts, list) and interrupts:
+                    first = interrupts[0]
+                    val = first.value if hasattr(first, "value") else first
+                    if isinstance(val, dict):
+                        text = (val.get("draft") or val.get("hint") or "") or ""
+                        text = strip_thinking(text.strip()) if text.strip() else str(val)
+                        return text if text.strip() else str(val)
+                    return str(val) if val is not None else ""
+                return str(interrupts)
+            return visible_response(result.get("messages", []))
+        except Exception as e:
+            logger.error(f"tell() failed: {e}")
+            return STRUCTURED_OUTPUT_ERROR
 
     async def load(self, save_data: dict, user_id: str, thread_id: str = None) -> None:
         """Restore a saved session into this Storyteller, replacing in-memory state."""

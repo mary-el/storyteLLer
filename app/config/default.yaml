@@ -10,6 +10,7 @@ llm:
   # base_url: http://127.0.0.1:19000/v1
   base_url: https://api.groq.com/openai/v1
   temperature: 0.3
+  max_tokens: 4096
 
 router:
   max_trim_tokens: 1000
@@ -61,6 +62,8 @@ story_update:
     Write a neutral 2-5 sentence summary. Include only events already in the transcript.
     The transcript:
     {transcript}
+    Update the title of the story, if necessary.
+    Current title: {title}
   summary_every_n_turns: 3
   max_trim_messages: 7
   world_patch_max_messages: 16
