@@ -20,14 +20,12 @@ class StoryNarratorConfig(BaseModel):
 
 
 class StoryUpdateConfig(BaseModel):
-    summary_prompt: str = Field(
-        description="System message for rolling summary; may use {previous_summary}"
-    )
-    summary_every_n_turns: int = Field(
-        default=3, ge=1, description="Generate a new summary only every N story turns."
+    archive_prompt: str = Field(
+        description="System message for archive node; uses {previous_summary}, {previous_events}, {transcript}, {title}"
     )
     max_trim_messages: int = Field(default=24, ge=1)
     world_patch_max_messages: int = Field(default=16, ge=1)
+    event_history_length: int = Field(default=10, ge=1)
 
 
 class ObjectGeneratorConfig(BaseModel):

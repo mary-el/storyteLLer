@@ -45,7 +45,6 @@ def list_memories(
     results = store.search(namespace, limit=limit, offset=offset)
     out: dict[str, dict[str, Any]] = {}
     for item in results:
-        # BaseStore.search returns SearchItem (subclass of Item)
         out[item.key] = _item_to_record(item)
     return out
 

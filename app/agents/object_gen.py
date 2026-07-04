@@ -91,14 +91,14 @@ class ObjectGenerator(ABC):
         """Return the field name in state (e.g., 'character', 'world')"""
         raise NotImplementedError("Subclasses must implement this property")
 
-    def initialize_object_node(self, state: StorytellerState, store: BaseStore = None):
+    async def initialize_object_node(self, state: StorytellerState, store: BaseStore = None):
         """Initialize the object with an ID if it doesn't exist."""
         store = store or self.memory_store
         logger.debug(f"Initializing object with store: {store}")
         obj = self.object_class()
         namespace = (state.get("user_id", "default"), "memories")
         if store:
-            store.put(namespace, obj.object_id, obj)
+            await store.aput(namespace, obj.object_id, obj)
         logger.debug(f"Object initialized: {obj}")
         return {"generated_object": obj}
 
@@ -138,7 +138,7 @@ class ObjectGenerator(ABC):
             # Save to memory store using namespace and object ID
             namespace = (state.get("user_id", "default"), "memories")
             if store:
-                store.put(namespace, existing_object.object_id, existing_object)
+                await store.aput(namespace, existing_object.object_id, existing_object)
             logger.debug(
                 f"Object saved to store: {namespace}, {existing_object.object_id}, {existing_object}"
             )

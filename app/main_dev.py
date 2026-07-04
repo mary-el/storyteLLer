@@ -10,10 +10,6 @@ dotenv.load_dotenv()
 # When invoking the graph via API, include user_id in config:
 # config = {"configurable": {"thread_id": "user_123", "user_id": "user_123"}}
 _config = load_app_config()
-_llm = ChatOpenAI(
-    model=_config.llm.model,
-    base_url=_config.llm.base_url,
-    temperature=_config.llm.temperature,
-)
+_llm = ChatOpenAI(**_config.llm)
 storyteller = Storyteller(langdev=True, config=_config)
 storyteller_graph = storyteller.build_graph()

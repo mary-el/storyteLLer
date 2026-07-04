@@ -24,6 +24,7 @@ from app.state.schemas import (
     Character,
     CharacterObject,
     Story,
+    StoryEvent,
     StoryStep,
     StorytellerState,
     WorldObject,
@@ -51,8 +52,8 @@ class RouterResponse(BaseModel):
     response: str = Field(description="User-visible message when node is dialogue")
 
 
-class SummaryResponse(BaseModel):
-    """Structured rolling summary of the story transcript."""
+class EventResponse(BaseModel):
+    """Combined archive response: rolling summary plus optional key-event recording."""
 
     summary: str = Field(
         description=(
@@ -63,6 +64,10 @@ class SummaryResponse(BaseModel):
     title: str = Field(
         description="A title for the story so far. It must be short and enthralling.",
         default="Untitled",
+    )
+    event: str = Field(
+        default="",
+        description="Concise one-sentence description of the key event. Empty string when no event to record.",
     )
 
 
@@ -79,6 +84,10 @@ class StoryResponse(BaseModel):
             "object_ids of characters whose state changed this turn. "
             "Empty list unless node is update_characters."
         ),
+    )
+    add_event: bool = Field(
+        default=False,
+        description="True if an event worth archiving occurred this turn.",
     )
 
 
@@ -152,11 +161,23 @@ class Storyteller:
             return node
         return "dialogue"
 
-    def route_from_story(self, state: StorytellerState) -> Literal["memory_tool"] | list[str]:
+    def route_from_story(self, state: StorytellerState) -> Literal["memory_tool", "after_story"]:
         node = parse_last_json(state.get("messages", [])).get("node", "dialogue")
         if node == "memory_tool":
             return "memory_tool"
-        return ["summary", "update_characters"]
+        return "after_story"
+
+    def route_from_after_story(self, state: StorytellerState) -> list[str]:
+        parsed = parse_last_json(state.get("messages", []))
+        logger.debug(f"route_from_after_story: parsed={parsed}")
+        char_ids = parsed.get("character_ids", [])
+        add_event: bool = parsed.get("add_event", False)
+        branches: list[str] = []
+        if char_ids:
+            branches.append("update_characters")
+        if add_event:
+            branches.append("archive")
+        return branches or ["finalize_turn"]
 
     # ── story context ──────────────────────────────────────────────────────────
 
@@ -219,12 +240,13 @@ class Storyteller:
         except Exception as e:
             logger.error(f"story_node failed: {e}")
             response = StoryResponse(
-                node="dialogue", response=STRUCTURED_OUTPUT_ERROR, character_ids=[]
+                node="dialogue", response=STRUCTURED_OUTPUT_ERROR, character_ids=[], add_event=False
             )
         payload = {
             "node": response.node,
             "response": response.response,
             "character_ids": response.character_ids,
+            "add_event": response.add_event,
         }
         return {
             "messages": [AIMessage(content=json.dumps(payload, ensure_ascii=False))],
@@ -264,7 +286,7 @@ class Storyteller:
             target = target.model_copy(update={"character": result["responses"][0]})
             namespace = (state.get("user_id", "default"), "memories")
             if self.memory_store:
-                self.memory_store.put(namespace, target.object_id, target)
+                await self.memory_store.aput(namespace, target.object_id, target)
             logger.debug(f"_patch_character: updated {character_id}")
             updated_chars = [target if c.object_id == character_id else c for c in story.characters]
             return story.model_copy(update={"characters": updated_chars})
@@ -272,12 +294,15 @@ class Storyteller:
             logger.error(f"_patch_character failed for {character_id}: {e}")
             return None
 
-    async def summary_node(self, state: StorytellerState) -> StorytellerState:
-        """Generate a new rolling summary when due; stored in _turn_summary for finalize_turn."""
+    async def archive_node(self, state: StorytellerState) -> StorytellerState:
+        """Combined archive: always generates a summary; records a key event when add_event=True."""
         story = coerce_story(state.get("story"))
-        turn = (state.get("turn") or 0) + 1
-        if turn % self.config.story_update.summary_every_n_turns != 0:
+        if not story:
             return {}
+
+        turn = (state.get("turn") or 0) + 1
+        add_event: bool = parse_last_json(state.get("messages", [])).get("add_event", False)
+
         messages = trim_messages(
             state.get("messages", []),
             max_tokens=self.config.story_update.max_trim_messages,
@@ -286,7 +311,6 @@ class Storyteller:
             start_on="human",
             include_system=False,
         )
-
         transcript_lines: list[str] = []
         for m in messages:
             text = message_text(m).strip()
@@ -296,19 +320,37 @@ class Storyteller:
             transcript_lines.append(f"{role}: {text}")
         transcript = "\n".join(transcript_lines)
 
-        summary_prompt = self.config.story_update.summary_prompt.format(
-            previous_summary=story.summary, transcript=transcript, title=story.title
+        previous_events = (
+            "\n".join(f"- (turn {e.turn}) {e.event}" for e in story.events)
+            if story.events
+            else "None yet."
+        )
+
+        archive_prompt = self.config.story_update.archive_prompt.format(
+            previous_summary=story.summary,
+            previous_events=previous_events,
+            transcript=transcript,
+            title=story.title,
         )
         try:
-            response = await self.llm.with_structured_output(SummaryResponse, strict=False).ainvoke(
-                [
-                    SystemMessage(content=summary_prompt),
-                ]
+            response = await self.llm.with_structured_output(EventResponse, strict=False).ainvoke(
+                [SystemMessage(content=archive_prompt)]
             )
-            return {"_turn_summary": response.summary.strip(), "_turn_title": response.title}
         except Exception as e:
-            logger.error(f"summary_node failed: {e}")
+            logger.error(f"archive_node failed: {e}")
             return {}
+
+        new_event: StoryEvent | None = None
+        if add_event and response.event.strip():
+            new_event = StoryEvent(turn=turn, event=response.event.strip())
+            logger.debug(f"archive_node: queued event at turn {turn}: {new_event.event!r}")
+
+        logger.debug("archive_node: queued summary update")
+        return {
+            "_turn_summary": response.summary.strip(),
+            "_turn_title": response.title,
+            "_new_event": new_event,
+        }
 
     async def update_characters_node(self, state: StorytellerState) -> StorytellerState:
         """Patch changed characters."""
@@ -337,20 +379,44 @@ class Storyteller:
         logger.debug(f"update_characters_node: characters_updated={n_updated}")
         return {"story": story}
 
-    def finalize_turn_node(self, state: StorytellerState) -> StorytellerState:
-        """Fan-in: merge _turn_summary into story after parallel summary + update_characters,
-        increment turn"""
+    async def finalize_turn_node(self, state: StorytellerState) -> StorytellerState:
+        """Fan-in: merge _turn_summary + _new_event into story; increment turn."""
         turn_summary = state.get("_turn_summary")
         turn_title = state.get("_turn_title")
+        new_event: StoryEvent | None = state.get("_new_event")  # type: ignore[assignment]
         turn = (state.get("turn") or 0) + 1
-        if not turn_summary:
-            return {"turn": turn}
         story = coerce_story(state.get("story"))
-        if not story:
-            return {"_turn_summary": None, "_turn_title": None, "turn": turn}
-        story = story.model_copy(update={"summary": turn_summary, "title": turn_title})
-        logger.debug("finalize_turn_node: merged _turn_summary into story.summary")
-        return {"story": story, "_turn_summary": None, "_turn_title": None, "turn": turn}
+
+        updates: dict = {
+            "turn": turn,
+            "_turn_summary": None,
+            "_turn_title": None,
+            "_new_event": None,
+        }
+
+        if turn_summary:
+            story = story.model_copy(
+                update={"summary": turn_summary, "title": turn_title or story.title}
+            )
+            logger.debug("finalize_turn_node: merged _turn_summary into story.summary")
+        if new_event:
+            story = story.model_copy(update={"events": [*story.events, new_event]})
+            if self.memory_store:
+                namespace = (state.get("user_id", "default"), "events")
+                await self.memory_store.aput(
+                    namespace,
+                    str(uuid.uuid4()),
+                    {"turn": new_event.turn, "event": new_event.event},
+                )
+            logger.debug(f"finalize_turn_node: archived event at turn {turn}: {new_event.event!r}")
+        if turn_summary or new_event:
+            updates["story"] = story
+
+        return updates
+
+    def after_story_node(self, state: StorytellerState) -> StorytellerState:
+        """Fan-out hub: passthrough node separating story narration from post-processing."""
+        return {}
 
     def enter_story(self, state: StorytellerState) -> StorytellerState:
         return {"phase": "story"}
@@ -388,11 +454,12 @@ class Storyteller:
         graph.add_node("story", self.story_node)
         graph.add_node("enter_story", self.enter_story)
         graph.add_node("memory_tool", self.memory_agent.graph)
+        graph.add_node("after_story", self.after_story_node)
+        graph.add_node("archive", self.archive_node)
         graph.add_node("update_characters", self.update_characters_node)
         graph.add_node("generate_character", self.character_generator.graph)
         graph.add_node("generate_world", self.world_generator.graph)
         graph.add_node("finalize_object", self.finalize_object)
-        graph.add_node("summary", self.summary_node)
         graph.add_node("finalize_turn", self.finalize_turn_node)
 
     def _add_setup_phase_edges(self, graph: StateGraph) -> None:
@@ -425,10 +492,15 @@ class Storyteller:
         graph.add_conditional_edges(
             "story",
             self.route_from_story,
-            ["memory_tool", "summary", "update_characters"],
+            {"memory_tool": "memory_tool", "after_story": "after_story"},
         )
-        graph.add_edge("memory_tool", END)
-        graph.add_edge("summary", "finalize_turn")
+        graph.add_edge("memory_tool", "story")
+        graph.add_conditional_edges(
+            "after_story",
+            self.route_from_after_story,
+            ["archive", "update_characters", "finalize_turn"],
+        )
+        graph.add_edge("archive", "finalize_turn")
         graph.add_edge("update_characters", "finalize_turn")
         graph.add_edge("finalize_turn", END)
 
@@ -533,11 +605,11 @@ class Storyteller:
             namespace_ev = (user_id, "events")
             if story.world:
                 wo = WorldObject(world=story.world)
-                self.memory_store.put(namespace_mem, wo.object_id, wo.model_dump())
+                await self.memory_store.aput(namespace_mem, wo.object_id, wo.model_dump())
             for co in story.characters:
-                self.memory_store.put(namespace_mem, co.object_id, co.model_dump())
+                await self.memory_store.aput(namespace_mem, co.object_id, co.model_dump())
             for ev in story.events:
-                self.memory_store.put(
+                await self.memory_store.aput(
                     namespace_ev, str(uuid.uuid4()), {"turn": ev.turn, "event": ev.event}
                 )
         logger.info(f"Loaded save '{story.title}' (phase={phase}, turn={turn})")

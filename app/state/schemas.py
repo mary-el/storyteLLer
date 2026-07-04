@@ -89,5 +89,8 @@ class StorytellerState(State):
     story: NotRequired[Story]
     phase: NotRequired[StoryStep]
     turn: NotRequired[int]
-    _turn_summary: NotRequired[str]  # written by summary_node, merged by finalize_turn
-    _turn_title: NotRequired[str]  # written by summary_node, merged by finalize_turn
+    _turn_summary: NotRequired[str]  # written by archive_node, merged by finalize_turn
+    _turn_title: NotRequired[str]  # written by archive_node, merged by finalize_turn
+    _new_event: NotRequired[
+        Optional[StoryEvent]
+    ]  # written by archive_node, merged by finalize_turn

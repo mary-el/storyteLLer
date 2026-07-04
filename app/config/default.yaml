@@ -45,6 +45,8 @@ story_narrator:
     - "character_ids": list of object_ids for characters whose state changed this turn.
       Use an empty list [] when node is "dialogue" or "memory_tool".
       When node is "update_characters", include the object_id(s) of all changed characters.
+    - "add_event": true if an event occurred this turn (new character, discovery, important conversation);
+    false for routine dialogue with no lasting consequence.
 
     Routing rules:
     - Use "dialogue" for normal narrative turns and reactions to the user.
@@ -55,16 +57,17 @@ story_narrator:
       List all changed characters in "character_ids". Still write the narrative in "response".
 
 story_update:
-  summary_prompt: |
-    You are a story summarizer, NOT the narrator. Do not continue the story or write dialogue.
-    Summarize the story so far based on the transcript in the user message.
+  archive_prompt: |
+    You are a story archivist, NOT the narrator. Summarize the story and record a key event.
     Previous summary (if any): {previous_summary}
-    Write a neutral 2-5 sentence summary. Include only events already in the transcript.
-    The transcript:
+    Previously recorded events:
+    {previous_events}
+    Transcript:
     {transcript}
-    Update the title of the story, if necessary.
     Current title: {title}
-  summary_every_n_turns: 3
+    An important event occurred since the last record — describe it concisely in the 'event' field."
+    Write a neutral 2-5 sentence summary. Include only events already in the transcript.
+    Update the title if the story has evolved significantly.
   max_trim_messages: 7
   world_patch_max_messages: 16
 
