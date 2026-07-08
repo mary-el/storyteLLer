@@ -1,8 +1,9 @@
 [project]
 name = "storyteller"
 version = "0.1.0"
-description = "Add your description here"
+description = "LangGraph-based interactive storytelling assistant: build a world, add characters, and play a narrative with rolling memory"
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.12"
 dependencies = [
     "dotenv>=0.9.9",
@@ -17,3 +18,19 @@ dependencies = [
     "streamlit>=1.58.0",
     "trustcall>=0.0.39",
 ]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

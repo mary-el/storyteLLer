@@ -5,9 +5,9 @@ greeting: |
   Describe the world you want to play in — its feel, setting, and theme.
 
 llm:
-  # model: rag-runtime
+  # Any OpenAI-compatible endpoint works: set model + base_url and put the
+  # matching API key in OPENAI_API_KEY (see .env.example).
   model: openai/gpt-oss-120b
-  # base_url: http://127.0.0.1:19000/v1
   base_url: https://api.groq.com/openai/v1
   temperature: 0.3
   max_tokens: 4096
@@ -45,8 +45,8 @@ story_narrator:
     - "character_ids": list of object_ids for characters whose state changed this turn.
       Use an empty list [] when node is "dialogue" or "memory_tool".
       When node is "update_characters", include the object_id(s) of all changed characters.
-    - "add_event": true if an event occurred this turn (new character, discovery, important conversation);
-    false for routine dialogue with no lasting consequence.
+    - "add_event": true if a key event occurred this turn (new character, discovery, important conversation);
+    false for routine dialogue or mundane events with no lasting consequence.
 
     Routing rules:
     - Use "dialogue" for normal narrative turns and reactions to the user.
@@ -65,7 +65,7 @@ story_update:
     Transcript:
     {transcript}
     Current title: {title}
-    An important event occurred since the last record — describe it concisely in the 'event' field."
+    An important event occurred since the last record — describe it concisely in the 'event' field.
     Write a neutral 2-5 sentence summary. Include only events already in the transcript.
     Update the title if the story has evolved significantly.
   max_trim_messages: 7
@@ -95,7 +95,8 @@ agents:
       1. Review the conversation;
       2. If human is satisfied with the character and tells it explicitly, or wants to create something else, return only the word "done".
       3. Otherwise, (re)write a character description based on the human feedback or ask for more feedback.
-      Be concise, use the same language as the user. Ask, if the user is satisfied with the character description or wants to change something.
+      Be concise, use the same language as the user. Write a plain text, not a JSON object.
+      Ask, if the user is satisfied with the character description or wants to change something.
     extraction_instructions: |
       Update existing character from the following conversation.
       Always use the same language as the user!
@@ -118,7 +119,8 @@ agents:
       1. Review the conversation;
       2. If human is satisfied with the world and tells it explicitly, or wants to create something else, return only the word "done".
       3. Otherwise, (re)write a world description based on the human feedback or ask for more feedback.
-      Be concise, use the same language as the user. Ask, if the user is satisfied with the world description or wants to change something.
+      Be concise, use the same language as the user. Write a plain text, not a JSON object.
+      Ask, if the user is satisfied with the world description or wants to change something.
     extraction_instructions: |
       Update existing world from the following conversation.
       Always use the same language as the user!

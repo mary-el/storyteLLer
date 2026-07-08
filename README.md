@@ -1,22 +1,45 @@
 # StoryteLLer
 
+![CI](https://github.com/mary-el/storyteLLer/actions/workflows/ci.yml/badge.svg)
+![Python 3.12](https://img.shields.io/badge/python-3.12-blue)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+
 ![](media/storyteller_img.png)
 
 Lightweight LangGraph-based storytelling assistant: build a **world**, add **characters**, then run the **story** with rolling memory, in-story character updates, and optional memory lookup.
 
+## Highlights
+
+- **Multi-agent LangGraph architecture** — a top-level graph with a setup router, story narrator, memory agent, and `story_update` archivist, all driven by structured JSON routing decisions.
+- **Human-in-the-loop object generation** — world and character creation run as reusable subgraphs (`ObjectGenerator`) that iterate on user feedback and extract structured Pydantic objects via [trustcall](https://github.com/hinthornw/trustcall) JSON-patching.
+- **Two memory layers** — a `Story` aggregate in graph state (world, characters, rolling summary, events) plus an `InMemoryStore` the narrator can query mid-story through the memory agent.
+- **Dual interfaces** — an interactive CLI and a Streamlit chat UI, both with auto-save/load persistence.
+- **Provider-agnostic LLM setup** — works with any OpenAI-compatible endpoint (Groq, OpenAI, local servers) via a single YAML config.
+
 ## Setup
 
+Requires Python 3.12+. With [uv](https://docs.astral.sh/uv/) (recommended):
+
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
-Create a `.env` with your API key:
+Or with pip:
+
+```bash
+pip install -e .
+```
+
+Copy [`.env.example`](.env.example) to `.env` and add your API key:
 
 ```env
 OPENAI_API_KEY=your_key_here
 ```
 
+The default config points at Groq's OpenAI-compatible API (`openai/gpt-oss-120b`). Any OpenAI-compatible provider works — edit the `llm` section (`model`, `base_url`) in [`app/config/default.yaml`](app/config/default.yaml) and set `OPENAI_API_KEY` to that provider's key.
+
 Configuration lives in [`app/config/default.yaml`](app/config/default.yaml). Override the path with `APP_CONFIG_PATH`. Key sections: `llm`, `router`, `story_narrator`, `story_update`, `agents`, `memory_agent`, `saves_dir`.
+
 ## Run
 
 **CLI**
@@ -105,3 +128,20 @@ flowchart TD
   extract -->|created| END
   extract -->|continue| human_feedback
 ```
+
+## Development
+
+Install dev tools and run the test suite:
+
+```bash
+uv sync
+uv run pytest
+```
+
+Formatting and linting are handled by pre-commit (black, isort, autoflake, flake8):
+
+```bash
+uv run pre-commit run --all-files
+```
+
+CI runs both on every push and pull request.
