@@ -67,12 +67,7 @@ def parse_last_json(messages: list) -> dict:
 
 
 def message_text(msg) -> str:
-    """Extract plain text from a message (JSON wire-format AIMessages use response field)."""
-    if isinstance(msg, AIMessage):
-        payload = parse_last_json([msg])
-        if "response" in payload:
-            return payload["response"] or ""
-        return getattr(msg, "content", "") or ""
+    """Extract plain text from a message."""
     return getattr(msg, "content", "") or ""
 
 
@@ -96,16 +91,10 @@ async def invoke_structured(
 
 
 def visible_response(messages: list) -> str:
-    """Extract user-visible text from the last AIMessage (JSON wire format or plain)."""
+    """Extract user-visible text from the last AIMessage."""
     for msg in reversed(messages):
         if not isinstance(msg, AIMessage):
             continue
         content = getattr(msg, "content", "") or ""
-        try:
-            payload = json.loads(content)
-            if isinstance(payload, dict) and payload.get("response"):
-                return strip_thinking(payload["response"])
-        except (json.JSONDecodeError, TypeError):
-            pass
         return strip_thinking(content)
     return ""

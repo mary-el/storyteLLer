@@ -1,10 +1,10 @@
 import asyncio
-import json
 import uuid
 from pathlib import Path
 from typing import Literal, Optional
 
 import dotenv
+import tiktoken
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, trim_messages
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
@@ -35,7 +35,6 @@ from app.utils import (
     invoke_structured,
     logger,
     message_text,
-    parse_last_json,
     strip_thinking,
     visible_response,
 )
@@ -89,6 +88,12 @@ class StoryResponse(BaseModel):
         default=False,
         description="True if an event worth archiving occurred this turn.",
     )
+
+
+def _count_tokens(messages: list) -> int:
+    """Count tokens using cl100k_base (GPT-4 family encoding) as a safe fallback."""
+    enc = tiktoken.get_encoding("cl100k_base")
+    return sum(4 + len(enc.encode(getattr(m, "content", "") or "")) for m in messages)
 
 
 class Storyteller:
@@ -156,22 +161,18 @@ class Storyteller:
     def route_from_router(
         self, state: StorytellerState
     ) -> Literal["generate_character", "begin_story", "dialogue"]:
-        node = parse_last_json(state.get("messages", [])).get("node", "dialogue")
+        node = state.get("_pending_node", "dialogue")
         if node in ("begin_story", "generate_character"):
-            return node
+            return node  # type: ignore[return-value]
         return "dialogue"
 
-    def route_from_story(self, state: StorytellerState) -> Literal["memory_tool", "after_story"]:
-        node = parse_last_json(state.get("messages", [])).get("node", "dialogue")
+    def route_from_story(self, state: StorytellerState) -> str | list[str]:
+        node = state.get("_pending_node", "dialogue")
         if node == "memory_tool":
             return "memory_tool"
-        return "after_story"
-
-    def route_from_after_story(self, state: StorytellerState) -> list[str]:
-        parsed = parse_last_json(state.get("messages", []))
-        logger.debug(f"route_from_after_story: parsed={parsed}")
-        char_ids = parsed.get("character_ids", [])
-        add_event: bool = parsed.get("add_event", False)
+        char_ids = state.get("_pending_char_ids") or []
+        add_event: bool = state.get("_pending_add_event") or False
+        logger.debug(f"route_from_story: char_ids={char_ids}, add_event={add_event}")
         branches: list[str] = []
         if char_ids:
             branches.append("update_characters")
@@ -201,7 +202,7 @@ class Storyteller:
         messages = trim_messages(
             state["messages"],
             max_tokens=self.router_max_len,
-            token_counter=len,
+            token_counter=_count_tokens,
             strategy="last",
             start_on="human",
             include_system=True,
@@ -213,11 +214,14 @@ class Storyteller:
         except Exception as e:
             logger.error(f"router_node failed: {e}")
             response = RouterResponse(node="dialogue", response=STRUCTURED_OUTPUT_ERROR)
-        payload = {"node": response.node, "response": response.response}
-        return {
-            "messages": [AIMessage(content=json.dumps(payload, ensure_ascii=False))],
+        updates: StorytellerState = {
+            "_pending_node": response.node,
+            "_pending_response": response.response,
             "status": None,
         }
+        if response.node == "dialogue" and response.response:
+            updates["messages"] = [AIMessage(content=response.response)]
+        return updates
 
     async def story_node(self, state: StorytellerState) -> StorytellerState:
         story = coerce_story(state.get("story"))
@@ -225,7 +229,7 @@ class Storyteller:
         messages = trim_messages(
             state["messages"],
             max_tokens=self.story_max_len,
-            token_counter=len,
+            token_counter=_count_tokens,
             strategy="last",
             start_on="human",
             include_system=True,
@@ -239,19 +243,19 @@ class Storyteller:
             response = StoryResponse(
                 node="dialogue", response=STRUCTURED_OUTPUT_ERROR, character_ids=[], add_event=False
             )
-        payload = {
-            "node": response.node,
-            "response": response.response,
-            "character_ids": response.character_ids,
-            "add_event": response.add_event,
-        }
         return {
-            "messages": [AIMessage(content=json.dumps(payload, ensure_ascii=False))],
+            "messages": [AIMessage(content=response.response)],
+            "_pending_node": response.node,
+            "_pending_response": response.response,
+            "_pending_char_ids": response.character_ids,
+            "_pending_add_event": response.add_event,
             "status": None,
         }
 
-    async def _patch_character(self, state: StorytellerState, character_id: str) -> Story | None:
-        """Extract updated state for one character; return a patched Story or None on failure."""
+    async def _patch_character(
+        self, state: StorytellerState, character_id: str
+    ) -> CharacterObject | None:
+        """Extract updated state for one character; return the patched CharacterObject or None."""
         story = coerce_story(state.get("story"))
         if not story:
             return None
@@ -280,13 +284,12 @@ class Storyteller:
             )
             if not result["responses"]:
                 return None
-            target = target.model_copy(update={"character": result["responses"][0]})
+            updated = target.model_copy(update={"character": result["responses"][0]})
             namespace = (state.get("user_id", "default"), "memories")
             if self.memory_store:
-                await self.memory_store.aput(namespace, target.object_id, target)
+                await self.memory_store.aput(namespace, updated.object_id, updated)
             logger.debug(f"_patch_character: updated {character_id}")
-            updated_chars = [target if c.object_id == character_id else c for c in story.characters]
-            return story.model_copy(update={"characters": updated_chars})
+            return updated
         except Exception as e:
             logger.error(f"_patch_character failed for {character_id}: {e}")
             return None
@@ -297,8 +300,7 @@ class Storyteller:
         if not story:
             return {}
 
-        turn = (state.get("turn") or 0) + 1
-        add_event: bool = parse_last_json(state.get("messages", [])).get("add_event", False)
+        add_event: bool = state.get("_pending_add_event") or False
 
         messages = trim_messages(
             state.get("messages", []),
@@ -330,8 +332,8 @@ class Storyteller:
             title=story.title,
         )
         try:
-            response = await self.llm.with_structured_output(EventResponse, strict=False).ainvoke(
-                [SystemMessage(content=archive_prompt)]
+            response = await invoke_structured(
+                self.llm, EventResponse, [SystemMessage(content=archive_prompt)]
             )
         except Exception as e:
             logger.error(f"archive_node failed: {e}")
@@ -339,8 +341,10 @@ class Storyteller:
 
         new_event: StoryEvent | None = None
         if add_event and response.event.strip():
-            new_event = StoryEvent(turn=turn, event=response.event.strip())
-            logger.debug(f"archive_node: queued event at turn {turn}: {new_event.event!r}")
+            new_event = StoryEvent(
+                turn=0, event=response.event.strip()
+            )  # turn stamped by finalize_turn
+            logger.debug(f"archive_node: queued event: {new_event.event!r}")
 
         logger.debug("archive_node: queued summary update")
         return {
@@ -355,25 +359,17 @@ class Storyteller:
         if not story:
             return {}
 
-        character_ids: list[str] = parse_last_json(state.get("messages", [])).get(
-            "character_ids", []
-        )
+        character_ids: list[str] = state.get("_pending_char_ids") or []
 
         coros = [self._patch_character(state, cid) for cid in character_ids]
         results = await asyncio.gather(*coros, return_exceptions=True) if coros else []
-        character_results = list(results)
 
-        # Merge each successfully patched character back into the story.
-        for char_result in character_results:
-            if isinstance(char_result, BaseException) or char_result is None:
-                continue
-            patched = {c.object_id: c for c in char_result.characters}
+        patched_map = {r.object_id: r for r in results if isinstance(r, CharacterObject)}
+        if patched_map:
             story = story.model_copy(
-                update={"characters": [patched.get(c.object_id, c) for c in story.characters]}
+                update={"characters": [patched_map.get(c.object_id, c) for c in story.characters]}
             )
-
-        n_updated = sum(1 for r in character_results if r and not isinstance(r, BaseException))
-        logger.debug(f"update_characters_node: characters_updated={n_updated}")
+        logger.debug(f"update_characters_node: characters_updated={len(patched_map)}")
         return {"story": story}
 
     async def finalize_turn_node(self, state: StorytellerState) -> StorytellerState:
@@ -397,6 +393,7 @@ class Storyteller:
             )
             logger.debug("finalize_turn_node: merged _turn_summary into story.summary")
         if new_event:
+            new_event = new_event.model_copy(update={"turn": turn})
             story = story.model_copy(update={"events": [*story.events, new_event]})
             if self.memory_store:
                 namespace = (state.get("user_id", "default"), "events")
@@ -410,10 +407,6 @@ class Storyteller:
             updates["story"] = story
 
         return updates
-
-    def after_story_node(self, state: StorytellerState) -> StorytellerState:
-        """Fan-out hub: passthrough node separating story narration from post-processing."""
-        return {}
 
     def enter_story(self, state: StorytellerState) -> StorytellerState:
         return {"phase": "story"}
@@ -451,7 +444,6 @@ class Storyteller:
         graph.add_node("story", self.story_node)
         graph.add_node("enter_story", self.enter_story)
         graph.add_node("memory_tool", self.memory_agent.graph)
-        graph.add_node("after_story", self.after_story_node)
         graph.add_node("archive", self.archive_node)
         graph.add_node("update_characters", self.update_characters_node)
         graph.add_node("generate_character", self.character_generator.graph)
@@ -489,14 +481,9 @@ class Storyteller:
         graph.add_conditional_edges(
             "story",
             self.route_from_story,
-            {"memory_tool": "memory_tool", "after_story": "after_story"},
+            ["memory_tool", "archive", "update_characters", "finalize_turn"],
         )
         graph.add_edge("memory_tool", "story")
-        graph.add_conditional_edges(
-            "after_story",
-            self.route_from_after_story,
-            ["archive", "update_characters", "finalize_turn"],
-        )
         graph.add_edge("archive", "finalize_turn")
         graph.add_edge("update_characters", "finalize_turn")
         graph.add_edge("finalize_turn", END)

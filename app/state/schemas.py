@@ -89,8 +89,13 @@ class StorytellerState(State):
     story: NotRequired[Story]
     phase: NotRequired[StoryStep]
     turn: NotRequired[int]
-    _turn_summary: NotRequired[str]  # written by archive_node, merged by finalize_turn
-    _turn_title: NotRequired[str]  # written by archive_node, merged by finalize_turn
-    _new_event: NotRequired[
-        Optional[StoryEvent]
-    ]  # written by archive_node, merged by finalize_turn
+    # Ephemeral routing metadata written by router_node / story_node, read by routing
+    # functions and sibling nodes; cleared after each turn.
+    _pending_node: NotRequired[str]
+    _pending_response: NotRequired[str]
+    _pending_char_ids: NotRequired[list[str]]
+    _pending_add_event: NotRequired[bool]
+    # Ephemeral fan-in fields written by archive_node, merged by finalize_turn_node.
+    _turn_summary: NotRequired[str]
+    _turn_title: NotRequired[str]
+    _new_event: NotRequired[Optional[StoryEvent]]

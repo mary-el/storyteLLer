@@ -6,7 +6,7 @@ class RouterConfig(BaseModel):
 
     system_prompt: str = Field(description="Router system prompt (structured routing JSON)")
     max_trim_tokens: int = Field(
-        default=1000, ge=1, description="Max tokens for trim_messages (token_counter=len)"
+        default=1000, ge=1, description="Max tokens passed to trim_messages (uses LLM tokenizer)"
     )
 
 
@@ -15,7 +15,7 @@ class StoryNarratorConfig(BaseModel):
 
     system_prompt: str = Field(description="Narrator system prompt (structured routing JSON)")
     max_trim_tokens: int = Field(
-        default=1000, ge=1, description="Max tokens for trim_messages (token_counter=len)"
+        default=1000, ge=1, description="Max tokens passed to trim_messages (uses LLM tokenizer)"
     )
 
 
