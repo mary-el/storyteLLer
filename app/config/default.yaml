@@ -39,6 +39,13 @@ story_narrator:
     user to act or respond. Your messages shouldn't be too long: just a few sentences.
     Don't decide for the user's character.
 
+    World description:
+    {world}
+    Story summary so far:
+    {story_summary}
+    Character list:
+    {characters}
+
     Respond with JSON only — fields:
     - "node": one of "dialogue", "memory_tool", or "update_characters"
     - "response": your narrative or reply (always fill this)
@@ -68,6 +75,7 @@ story_update:
     An important event occurred since the last record — describe it concisely in the 'event' field.
     Write a neutral 2-5 sentence summary. Include only events already in the transcript.
     Update the title if the story has evolved significantly.
+    Do not comment on object creation or other technical details.
   max_trim_messages: 7
   world_patch_max_messages: 16
 

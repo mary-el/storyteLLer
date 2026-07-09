@@ -181,16 +181,16 @@ class Storyteller:
 
     # ── story context ──────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _story_context_block(story: Story | None) -> str:
-        if not story:
-            return "No story context."
-        parts: list[str] = []
-        if story.world is not None:
-            parts.append("World:\n" + story.world.model_dump_json(indent=2))
-        for co in story.characters:
-            parts.append(f"Character ({co.object_id}):\n" + co.model_dump_json(indent=2))
-        return "\n\n".join(parts) if parts else "Story setup in progress."
+    def _get_story_context(self, story: Story) -> str:
+        characters = "\n".join(
+            f"Character ({co.object_id}):\n{co.model_dump_json(indent=2)}"
+            for co in story.characters
+        )
+        return self.config.story_narrator.system_prompt.format(
+            world=story.world.model_dump_json(indent=2),
+            story_summary=story.summary,
+            characters=characters,
+        )
 
     # ── nodes ──────────────────────────────────────────────────────────────────
 
@@ -221,10 +221,7 @@ class Storyteller:
 
     async def story_node(self, state: StorytellerState) -> StorytellerState:
         story = coerce_story(state.get("story"))
-        context = self._story_context_block(story)
-        combined_system = (
-            f"{self.config.story_narrator.system_prompt}\n\n--- Current story setup ---\n{context}"
-        )
+        context = self._get_story_context(story)
         messages = trim_messages(
             state["messages"],
             max_tokens=self.story_max_len,
@@ -234,7 +231,7 @@ class Storyteller:
             include_system=True,
         )
         logger.debug("routing to story narrator")
-        llm_messages = [SystemMessage(content=combined_system), *messages]
+        llm_messages = [SystemMessage(content=context), *messages]
         try:
             response = await invoke_structured(self.llm, StoryResponse, llm_messages)
         except Exception as e:
