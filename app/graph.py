@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import dotenv
-import tiktoken
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, trim_messages
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
@@ -12,7 +11,6 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command
-from pydantic import BaseModel, Field
 from trustcall import create_extractor
 
 from app import persistence
@@ -28,10 +26,13 @@ from app.state.schemas import (
     StoryStep,
     StorytellerState,
     WorldObject,
-    coerce_story,
 )
 from app.utils import (
     STRUCTURED_OUTPUT_ERROR,
+    EventResponse,
+    RouterResponse,
+    StoryResponse,
+    count_tokens,
     invoke_structured,
     logger,
     message_text,
@@ -40,60 +41,6 @@ from app.utils import (
 )
 
 dotenv.load_dotenv()
-
-
-class RouterResponse(BaseModel):
-    """Structured response from setup router (world exists; characters until begin)."""
-
-    node: Literal["generate_character", "dialogue", "begin_story"] = Field(
-        description="Next node: character subgraph, end turn, or enter story phase"
-    )
-    response: str = Field(description="User-visible message when node is dialogue")
-
-
-class EventResponse(BaseModel):
-    """Combined archive response: rolling summary plus optional key-event recording."""
-
-    summary: str = Field(
-        description=(
-            "A neutral 2-5 sentence summary of the story so far. "
-            "Include only events from the transcript; do not add new information or continue the narrative."
-        )
-    )
-    title: str = Field(
-        description="A title for the story so far. It must be short and enthralling.",
-        default="Untitled",
-    )
-    event: str = Field(
-        default="",
-        description="Concise one-sentence description of the key event. Empty string when no event to record.",
-    )
-
-
-class StoryResponse(BaseModel):
-    """Structured response from story narrator."""
-
-    node: Literal["memory_tool", "dialogue", "update_characters"] = Field(
-        description="Memory lookup, narrative reply, or character state update"
-    )
-    response: str = Field(description="Narrative or reply (always fill this)")
-    character_ids: list[str] = Field(
-        default_factory=list,
-        description=(
-            "object_ids of characters whose state changed this turn. "
-            "Empty list unless node is update_characters."
-        ),
-    )
-    add_event: bool = Field(
-        default=False,
-        description="True if an event worth archiving occurred this turn.",
-    )
-
-
-def _count_tokens(messages: list) -> int:
-    """Count tokens using cl100k_base (GPT-4 family encoding) as a safe fallback."""
-    enc = tiktoken.get_encoding("cl100k_base")
-    return sum(4 + len(enc.encode(getattr(m, "content", "") or "")) for m in messages)
 
 
 class Storyteller:
@@ -151,7 +98,7 @@ class Storyteller:
     ) -> Literal["greeting", "generate_world", "router", "story"]:
         if state.get("phase") == "story":
             return "story"
-        story = coerce_story(state.get("story"))
+        story = state.get("story")
         if story is None or story.world is None:
             if not state.get("messages"):
                 return "greeting"
@@ -161,10 +108,7 @@ class Storyteller:
     def route_from_router(
         self, state: StorytellerState
     ) -> Literal["generate_character", "begin_story", "dialogue"]:
-        node = state.get("_pending_node", "dialogue")
-        if node in ("begin_story", "generate_character"):
-            return node  # type: ignore[return-value]
-        return "dialogue"
+        return state.get("_pending_node", "dialogue")
 
     def route_from_story(self, state: StorytellerState) -> str | list[str]:
         node = state.get("_pending_node", "dialogue")
@@ -202,7 +146,7 @@ class Storyteller:
         messages = trim_messages(
             state["messages"],
             max_tokens=self.router_max_len,
-            token_counter=_count_tokens,
+            token_counter=count_tokens,
             strategy="last",
             start_on="human",
             include_system=True,
@@ -224,12 +168,12 @@ class Storyteller:
         return updates
 
     async def story_node(self, state: StorytellerState) -> StorytellerState:
-        story = coerce_story(state.get("story"))
+        story = state.get("story")
         context = self._get_story_context(story)
         messages = trim_messages(
             state["messages"],
             max_tokens=self.story_max_len,
-            token_counter=_count_tokens,
+            token_counter=count_tokens,
             strategy="last",
             start_on="human",
             include_system=True,
@@ -249,6 +193,7 @@ class Storyteller:
             "_pending_response": response.response,
             "_pending_char_ids": response.character_ids,
             "_pending_add_event": response.add_event,
+            "phase": "story",
             "status": None,
         }
 
@@ -256,7 +201,7 @@ class Storyteller:
         self, state: StorytellerState, character_id: str
     ) -> CharacterObject | None:
         """Extract updated state for one character; return the patched CharacterObject or None."""
-        story = coerce_story(state.get("story"))
+        story = state.get("story")
         if not story:
             return None
         target = next((c for c in story.characters if c.object_id == character_id), None)
@@ -296,7 +241,7 @@ class Storyteller:
 
     async def archive_node(self, state: StorytellerState) -> StorytellerState:
         """Combined archive: always generates a summary; records a key event when add_event=True."""
-        story = coerce_story(state.get("story"))
+        story = state.get("story")
         if not story:
             return {}
 
@@ -355,7 +300,7 @@ class Storyteller:
 
     async def update_characters_node(self, state: StorytellerState) -> StorytellerState:
         """Patch changed characters."""
-        story = coerce_story(state.get("story"))
+        story = state.get("story")
         if not story:
             return {}
 
@@ -378,7 +323,7 @@ class Storyteller:
         turn_title = state.get("_turn_title")
         new_event: StoryEvent | None = state.get("_new_event")  # type: ignore[assignment]
         turn = (state.get("turn") or 0) + 1
-        story = coerce_story(state.get("story"))
+        story = state.get("story")
 
         updates: dict = {
             "turn": turn,
@@ -387,36 +332,36 @@ class Storyteller:
             "_new_event": None,
         }
 
+        if not story:
+            return updates
+
+        patch: dict = {}
         if turn_summary:
-            story = story.model_copy(
-                update={"summary": turn_summary, "title": turn_title or story.title}
-            )
+            patch["summary"] = turn_summary
+            patch["title"] = turn_title or story.title
             logger.debug("finalize_turn_node: merged _turn_summary into story.summary")
         if new_event:
-            new_event = new_event.model_copy(update={"turn": turn})
-            story = story.model_copy(update={"events": [*story.events, new_event]})
+            stamped = StoryEvent(turn=turn, event=new_event.event)
+            patch["events"] = [*story.events, stamped]
             if self.memory_store:
                 namespace = (state.get("user_id", "default"), "events")
                 await self.memory_store.aput(
                     namespace,
                     str(uuid.uuid4()),
-                    {"turn": new_event.turn, "event": new_event.event},
+                    {"turn": stamped.turn, "event": stamped.event},
                 )
-            logger.debug(f"finalize_turn_node: archived event at turn {turn}: {new_event.event!r}")
-        if turn_summary or new_event:
-            updates["story"] = story
+            logger.debug(f"finalize_turn_node: archived event at turn {turn}: {stamped.event!r}")
+        if patch:
+            updates["story"] = story.model_copy(update=patch)
 
         return updates
-
-    def enter_story(self, state: StorytellerState) -> StorytellerState:
-        return {"phase": "story"}
 
     def finalize_object(self, state: StorytellerState) -> StorytellerState:
         logger.debug("Finalizing object generation")
         generated_object = state.get("generated_object")
         if not generated_object:
             return {}
-        story = coerce_story(state.get("story")) or Story()
+        story = state.get("story") or Story()
         if isinstance(generated_object, WorldObject):
             story = story.model_copy(update={"world": generated_object.world})
             phase: StoryStep = "characters"
@@ -442,7 +387,6 @@ class Storyteller:
         graph.add_node("greeting", self.greeting_node)
         graph.add_node("router", self.router_node)
         graph.add_node("story", self.story_node)
-        graph.add_node("enter_story", self.enter_story)
         graph.add_node("memory_tool", self.memory_agent.graph)
         graph.add_node("archive", self.archive_node)
         graph.add_node("update_characters", self.update_characters_node)
@@ -471,11 +415,10 @@ class Storyteller:
             self.route_from_router,
             {
                 "generate_character": "generate_character",
-                "begin_story": "enter_story",
+                "begin_story": "story",
                 "dialogue": END,
             },
         )
-        graph.add_edge("enter_story", "story")
 
     def _add_story_phase_edges(self, graph: StateGraph) -> None:
         graph.add_conditional_edges(
@@ -517,7 +460,7 @@ class Storyteller:
         """Persist current state to disk after each turn; silently skips if no story yet."""
         if not self.saves_dir:
             return
-        story = coerce_story(result.get("story"))
+        story = result.get("story")
         if story is None or story.world is None:
             return
         messages = result.get("messages", [])

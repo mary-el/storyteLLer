@@ -1,11 +1,12 @@
 import json
 import re
 import sys
-from typing import TypeVar
+from typing import Literal, TypeVar
 
+import tiktoken
 from langchain_core.messages import AIMessage
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 STRUCTURED_OUTPUT_ERROR = "Sorry, the narrator failed to respond. Please try again."
 
@@ -98,3 +99,57 @@ def visible_response(messages: list) -> str:
         content = getattr(msg, "content", "") or ""
         return strip_thinking(content)
     return ""
+
+
+def count_tokens(messages: list) -> int:
+    """Count tokens using cl100k_base (GPT-4 family encoding) as a safe fallback."""
+    enc = tiktoken.get_encoding("cl100k_base")
+    return sum(4 + len(enc.encode(getattr(m, "content", ""))) for m in messages)
+
+
+class RouterResponse(BaseModel):
+    """Structured response from setup router (world exists; characters until begin)."""
+
+    node: Literal["generate_character", "dialogue", "begin_story"] = Field(
+        description="Next node: character subgraph, end turn, or enter story phase"
+    )
+    response: str = Field(description="User-visible message when node is dialogue")
+
+
+class EventResponse(BaseModel):
+    """Combined archive response: rolling summary plus optional key-event recording."""
+
+    summary: str = Field(
+        description=(
+            "A neutral 2-5 sentence summary of the story so far. "
+            "Include only events from the transcript; do not add new information or continue the narrative."
+        )
+    )
+    title: str = Field(
+        description="A title for the story so far. It must be short and enthralling.",
+        default="Untitled",
+    )
+    event: str = Field(
+        default="",
+        description="Concise one-sentence description of the key event. Empty string when no event to record.",
+    )
+
+
+class StoryResponse(BaseModel):
+    """Structured response from story narrator."""
+
+    node: Literal["memory_tool", "dialogue", "update_characters"] = Field(
+        description="Memory lookup, narrative reply, or character state update"
+    )
+    response: str = Field(description="Narrative or reply (always fill this)")
+    character_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "object_ids of characters whose state changed this turn. "
+            "Empty list unless node is update_characters."
+        ),
+    )
+    add_event: bool = Field(
+        default=False,
+        description="True if an event worth archiving occurred this turn.",
+    )

@@ -1,5 +1,5 @@
 import uuid
-from typing import Any, Literal, NotRequired, Optional
+from typing import Annotated, Any, Literal, NotRequired, Optional
 
 from langgraph.graph import MessagesState
 from pydantic import BaseModel, Field
@@ -75,6 +75,11 @@ def coerce_story(raw: Any) -> Optional[Story]:
     return None
 
 
+def _story_reducer(current: Any, update: Any) -> Optional[Story]:
+    """Last-write-wins reducer that always coerces to a Story instance."""
+    return coerce_story(update if update is not None else current)
+
+
 class State(MessagesState):
     """State for ObjectGenerator subgraphs and Storyteller graph"""
 
@@ -86,7 +91,7 @@ class State(MessagesState):
 class StorytellerState(State):
     """Top-level graph state: running story aggregate + pipeline phase."""
 
-    story: NotRequired[Story]
+    story: NotRequired[Annotated[Optional[Story], _story_reducer]]
     phase: NotRequired[StoryStep]
     turn: NotRequired[int]
     # Ephemeral routing metadata written by router_node / story_node, read by routing
