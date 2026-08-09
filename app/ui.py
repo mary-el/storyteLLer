@@ -143,7 +143,7 @@ def _render_sidebar(story) -> None:
         config = {"configurable": {"user_id": _USER_ID, "thread_id": _thread_id()}}
         snap = asyncio.run(st.session_state.storyteller.graph.aget_state(config))
         phase = (snap.values or {}).get("phase", "world")
-        phase_color = {"world": "🌍", "characters": "🧙", "story": "📖"}.get(phase, "•")
+        phase_color = {"world": "🌍", "story": "📖"}.get(phase, "•")
         st.markdown(f"**Phase:** {phase_color} `{phase}`")
 
         st.divider()

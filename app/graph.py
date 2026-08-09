@@ -1,36 +1,24 @@
-import asyncio
 import uuid
 from pathlib import Path
 from typing import Literal, Optional
 
 import dotenv
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, trim_messages
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command
-from trustcall import create_extractor
 
 from app import persistence
-from app.agents.character_gen import CharacterGenerator
+from app.agents.character_agent import CharacterAgent
 from app.agents.memory_agent import MemoryAgent
 from app.agents.world_gen import WorldGenerator
 from app.config import AppConfig, load_app_config
-from app.state.schemas import (
-    Character,
-    CharacterObject,
-    Story,
-    StoryEvent,
-    StoryStep,
-    StorytellerState,
-    WorldObject,
-)
+from app.state.schemas import Story, StoryEvent, StorytellerState, WorldObject
 from app.utils import (
     STRUCTURED_OUTPUT_ERROR,
     EventResponse,
-    RouterResponse,
     StoryResponse,
     count_tokens,
     invoke_structured,
@@ -58,20 +46,15 @@ class Storyteller:
         self.checkpointer = MemorySaver() if not langdev else None
         self.memory_store = memory_store
         self.langdev = langdev
-        self.character_generator = CharacterGenerator(
+        self.character_agent = CharacterAgent(
             self.llm,
-            self.checkpointer,
             memory_store,
-            langdev=langdev,
             app_config=self.config,
         )
         self.memory_agent = MemoryAgent(
             self.llm,
             system_prompt=self.config.memory_agent.system_prompt,
             memory_store=memory_store,
-        )
-        self.character_extractor = create_extractor(
-            self.llm, tools=[Character], tool_choice="required", enable_inserts=False
         )
         self.world_generator = WorldGenerator(
             self.llm,
@@ -80,13 +63,6 @@ class Storyteller:
             langdev=langdev,
             app_config=self.config,
         )
-        self.router_template = ChatPromptTemplate(
-            [
-                MessagesPlaceholder(variable_name="conversation", optional=True),
-                ("system", self.config.router.system_prompt),
-            ]
-        )
-        self.router_max_len = self.config.router.max_trim_tokens
         self.story_max_len = self.config.story_narrator.max_trim_tokens
         self.graph = self.build_graph()
         self.waiting_for_feedback = False
@@ -95,31 +71,37 @@ class Storyteller:
 
     def next_after_start(
         self, state: StorytellerState
-    ) -> Literal["greeting", "generate_world", "router", "story"]:
-        if state.get("phase") == "story":
-            return "story"
+    ) -> Literal["greeting", "generate_world", "story"]:
         story = state.get("story")
         if story is None or story.world is None:
             if not state.get("messages"):
                 return "greeting"
             return "generate_world"
-        return "router"
+        return "story"
 
-    def route_from_router(
-        self, state: StorytellerState
-    ) -> Literal["generate_character", "begin_story", "dialogue"]:
-        return state.get("_pending_node", "dialogue")
+    def after_finalize_world(self, state: StorytellerState) -> Literal["story", "generate_world"]:
+        """Guard against entering `story` without a world — e.g. if generate_world's wizard
+        was re-entered without actually finishing (resumed with a plain message instead of a
+        proper Command, leaving `generated_object`/`story` unset for this turn)."""
+        story = state.get("story")
+        if story is None or story.world is None:
+            logger.warning(
+                "after_finalize_world: no world in state yet; routing back to generate_world "
+                "instead of entering story"
+            )
+            return "generate_world"
+        return "story"
 
     def route_from_story(self, state: StorytellerState) -> str | list[str]:
         node = state.get("_pending_node", "dialogue")
         if node == "memory_tool":
             return "memory_tool"
-        char_ids = state.get("_pending_char_ids") or []
+        commands = state.get("_pending_character_commands") or []
         add_event: bool = state.get("_pending_add_event") or False
-        logger.debug(f"route_from_story: char_ids={char_ids}, add_event={add_event}")
+        logger.debug(f"route_from_story: commands={len(commands)}, add_event={add_event}")
         branches: list[str] = []
-        if char_ids:
-            branches.append("update_characters")
+        if commands:
+            branches.append("character_agent")
         if add_event:
             branches.append("archive")
         return branches or ["finalize_turn"]
@@ -142,31 +124,6 @@ class Storyteller:
     def greeting_node(self, state: StorytellerState) -> StorytellerState:
         return {"messages": [AIMessage(content=self.config.greeting)]}
 
-    async def router_node(self, state: StorytellerState) -> StorytellerState:
-        messages = trim_messages(
-            state["messages"],
-            max_tokens=self.router_max_len,
-            token_counter=count_tokens,
-            strategy="last",
-            start_on="human",
-            include_system=True,
-        )
-        logger.debug("routing to router")
-        prompt = self.router_template.invoke({"conversation": messages})
-        try:
-            response = await invoke_structured(self.llm, RouterResponse, prompt)
-        except Exception as e:
-            logger.error(f"router_node failed: {e}")
-            response = RouterResponse(node="dialogue", response=STRUCTURED_OUTPUT_ERROR)
-        updates: StorytellerState = {
-            "_pending_node": response.node,
-            "_pending_response": response.response,
-            "status": None,
-        }
-        if response.node == "dialogue" and response.response:
-            updates["messages"] = [AIMessage(content=response.response)]
-        return updates
-
     async def story_node(self, state: StorytellerState) -> StorytellerState:
         story = state.get("story")
         context = self._get_story_context(story)
@@ -185,59 +142,20 @@ class Storyteller:
         except Exception as e:
             logger.error(f"story_node failed: {e}")
             response = StoryResponse(
-                node="dialogue", response=STRUCTURED_OUTPUT_ERROR, character_ids=[], add_event=False
+                node="dialogue",
+                response=STRUCTURED_OUTPUT_ERROR,
+                character_commands=[],
+                add_event=False,
             )
         return {
             "messages": [AIMessage(content=response.response)],
             "_pending_node": response.node,
             "_pending_response": response.response,
-            "_pending_char_ids": response.character_ids,
+            "_pending_character_commands": response.character_commands,
             "_pending_add_event": response.add_event,
             "phase": "story",
             "status": None,
         }
-
-    async def _patch_character(
-        self, state: StorytellerState, character_id: str
-    ) -> CharacterObject | None:
-        """Extract updated state for one character; return the patched CharacterObject or None."""
-        story = state.get("story")
-        if not story:
-            return None
-        target = next((c for c in story.characters if c.object_id == character_id), None)
-        if target is None:
-            logger.warning(f"_patch_character: {character_id!r} not found")
-            return None
-        messages = trim_messages(
-            state.get("messages", []),
-            max_tokens=self.config.story_update.world_patch_max_messages,
-            token_counter=len,
-            strategy="last",
-            start_on="human",
-            include_system=False,
-        )
-        clean_messages = [
-            AIMessage(content=message_text(m)) if isinstance(m, AIMessage) else m for m in messages
-        ]
-        try:
-            result = await self.character_extractor.ainvoke(
-                {
-                    "messages": clean_messages
-                    + [SystemMessage(content="Update the character based on the story so far.")],
-                    "existing": {"Character": target.character.model_dump()},
-                }
-            )
-            if not result["responses"]:
-                return None
-            updated = target.model_copy(update={"character": result["responses"][0]})
-            namespace = (state.get("user_id", "default"), "memories")
-            if self.memory_store:
-                await self.memory_store.aput(namespace, updated.object_id, updated)
-            logger.debug(f"_patch_character: updated {character_id}")
-            return updated
-        except Exception as e:
-            logger.error(f"_patch_character failed for {character_id}: {e}")
-            return None
 
     async def archive_node(self, state: StorytellerState) -> StorytellerState:
         """Combined archive: always generates a summary; records a key event when add_event=True."""
@@ -298,25 +216,6 @@ class Storyteller:
             "_new_event": new_event,
         }
 
-    async def update_characters_node(self, state: StorytellerState) -> StorytellerState:
-        """Patch changed characters."""
-        story = state.get("story")
-        if not story:
-            return {}
-
-        character_ids: list[str] = state.get("_pending_char_ids") or []
-
-        coros = [self._patch_character(state, cid) for cid in character_ids]
-        results = await asyncio.gather(*coros, return_exceptions=True) if coros else []
-
-        patched_map = {r.object_id: r for r in results if isinstance(r, CharacterObject)}
-        if patched_map:
-            story = story.model_copy(
-                update={"characters": [patched_map.get(c.object_id, c) for c in story.characters]}
-            )
-        logger.debug(f"update_characters_node: characters_updated={len(patched_map)}")
-        return {"story": story}
-
     async def finalize_turn_node(self, state: StorytellerState) -> StorytellerState:
         """Fan-in: merge _turn_summary + _new_event into story; increment turn."""
         turn_summary = state.get("_turn_summary")
@@ -356,20 +255,14 @@ class Storyteller:
 
         return updates
 
-    def finalize_object(self, state: StorytellerState) -> StorytellerState:
-        logger.debug("Finalizing object generation")
+    def finalize_world_node(self, state: StorytellerState) -> StorytellerState:
+        """Merge the freshly generated world into the story and enter the story phase."""
+        logger.debug("Finalizing world generation")
         generated_object = state.get("generated_object")
         if not generated_object:
             return {}
         story = state.get("story") or Story()
-        if isinstance(generated_object, WorldObject):
-            story = story.model_copy(update={"world": generated_object.world})
-            phase: StoryStep = "characters"
-        elif isinstance(generated_object, CharacterObject):
-            story = story.model_copy(update={"characters": [*story.characters, generated_object]})
-            phase = state.get("phase", "characters")
-        else:
-            phase = state.get("phase", "characters")
+        story = story.model_copy(update={"world": generated_object.world})
         return {
             "messages": [
                 SystemMessage(
@@ -378,63 +271,54 @@ class Storyteller:
             ],
             "generated_object": None,
             "story": story,
-            "phase": phase,
+            "phase": "story",
         }
 
     # ── graph construction ─────────────────────────────────────────────────────
 
     def _add_nodes(self, graph: StateGraph) -> None:
         graph.add_node("greeting", self.greeting_node)
-        graph.add_node("router", self.router_node)
         graph.add_node("story", self.story_node)
         graph.add_node("memory_tool", self.memory_agent.graph)
         graph.add_node("archive", self.archive_node)
-        graph.add_node("update_characters", self.update_characters_node)
-        graph.add_node("generate_character", self.character_generator.graph)
+        graph.add_node("character_agent", self.character_agent.run)
         graph.add_node("generate_world", self.world_generator.graph)
-        graph.add_node("finalize_object", self.finalize_object)
+        graph.add_node("finalize_world", self.finalize_world_node)
         graph.add_node("finalize_turn", self.finalize_turn_node)
 
-    def _add_setup_phase_edges(self, graph: StateGraph) -> None:
+    def _add_world_phase_edges(self, graph: StateGraph) -> None:
         graph.add_conditional_edges(
             START,
             self.next_after_start,
             {
                 "greeting": "greeting",
                 "generate_world": "generate_world",
-                "router": "router",
                 "story": "story",
             },
         )
         graph.add_edge("greeting", END)
-        graph.add_edge("generate_world", "finalize_object")
-        graph.add_edge("generate_character", "finalize_object")
-        graph.add_edge("finalize_object", "router")
+        graph.add_edge("generate_world", "finalize_world")
         graph.add_conditional_edges(
-            "router",
-            self.route_from_router,
-            {
-                "generate_character": "generate_character",
-                "begin_story": "story",
-                "dialogue": END,
-            },
+            "finalize_world",
+            self.after_finalize_world,
+            {"story": "story", "generate_world": "generate_world"},
         )
 
     def _add_story_phase_edges(self, graph: StateGraph) -> None:
         graph.add_conditional_edges(
             "story",
             self.route_from_story,
-            ["memory_tool", "archive", "update_characters", "finalize_turn"],
+            ["memory_tool", "archive", "character_agent", "finalize_turn"],
         )
         graph.add_edge("memory_tool", "story")
         graph.add_edge("archive", "finalize_turn")
-        graph.add_edge("update_characters", "finalize_turn")
+        graph.add_edge("character_agent", "finalize_turn")
         graph.add_edge("finalize_turn", END)
 
     def build_graph(self):
         graph = StateGraph(StorytellerState)
         self._add_nodes(graph)
-        self._add_setup_phase_edges(graph)
+        self._add_world_phase_edges(graph)
         self._add_story_phase_edges(graph)
         return graph.compile(checkpointer=self.checkpointer)
 

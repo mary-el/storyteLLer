@@ -60,8 +60,6 @@ class ObjectGenerator(ABC):
         self.generation_instructions = agent.generation_instructions
         self.extraction_instructions = agent.extraction_instructions
         self.max_messages = og.max_messages
-        self.extract_every_n_messages = og.extract_every_n_messages
-        self.current_message_count = 0
         self.memory_store = memory_store
         # Create extractor using the object class
         self.trustcall_extractor = self._create_extractor()
@@ -170,32 +168,18 @@ class ObjectGenerator(ABC):
         return {"messages": [HumanMessage(content=feedback)]}
 
     def should_extract(self, state: StorytellerState, store: BaseStore = None):
-        """Return if the extract node should be executed"""
-        # Check if object is created or max messages reached
+        """Extract exactly once, right before finalizing; otherwise keep gathering feedback."""
         status = state.get("status", "in_progress")
-        if status == "created" or self.current_message_count >= self.extract_every_n_messages:
-            self.current_message_count = 0
-            logger.debug("Extracting object")
+        if status == "created":
+            logger.debug("Object finished — extracting before finalizing")
             return "extract"
 
-        # Otherwise continue to human feedback
         logger.debug("Continuing to human feedback")
-        return "human_feedback"
-
-    def should_continue(self, state: StorytellerState, store: BaseStore = None):
-        """Return the next node to execute"""
-        # Check if object is created
-        status = state.get("status", "in_progress")
-        logger.debug(f"Should continue: {status}")
-        if status == "created":
-            return END
-        # Otherwise continue to human feedback
         return "human_feedback"
 
     async def generate_description(self, state: StorytellerState, store: BaseStore = None):
         """Generate a description of the object."""
         messages = self.trim_messages(state.get("messages", []))
-        self.current_message_count += 1
         start_time = time.time()
         logger.debug(
             f"Generating description: {messages + [SystemMessage(content=self.generation_instructions)]}"
@@ -244,11 +228,11 @@ class ObjectGenerator(ABC):
         # Run generation on the first user message immediately; interrupt only after a draft exists.
         builder.add_edge("initialize_object", "generate_description")
         builder.add_edge("human_feedback", "generate_description")
-        # Route to extract and human_feedback in parallel when extraction is needed
+        # Keep gathering feedback until the object is finished, then extract exactly once.
         builder.add_conditional_edges(
             "generate_description", self.should_extract, ["extract", "human_feedback"]
         )
-        builder.add_conditional_edges("extract", self.should_continue, ["human_feedback", END])
+        builder.add_edge("extract", END)
         # Compile with checkpoint saver
         # NodeInterrupt in human_feedback will propagate to parent graph automatically
         self.graph = builder.compile(checkpointer=self.checkpointer)

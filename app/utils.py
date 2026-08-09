@@ -43,6 +43,7 @@ logger.add(
 )
 
 _RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
+_TOKEN_ENCODING = tiktoken.get_encoding("cl100k_base")
 
 
 def split_thinking(text: str) -> tuple[str | None, str]:
@@ -103,17 +104,7 @@ def visible_response(messages: list) -> str:
 
 def count_tokens(messages: list) -> int:
     """Count tokens using cl100k_base (GPT-4 family encoding) as a safe fallback."""
-    enc = tiktoken.get_encoding("cl100k_base")
-    return sum(4 + len(enc.encode(getattr(m, "content", ""))) for m in messages)
-
-
-class RouterResponse(BaseModel):
-    """Structured response from setup router (world exists; characters until begin)."""
-
-    node: Literal["generate_character", "dialogue", "begin_story"] = Field(
-        description="Next node: character subgraph, end turn, or enter story phase"
-    )
-    response: str = Field(description="User-visible message when node is dialogue")
+    return sum(4 + len(_TOKEN_ENCODING.encode(getattr(m, "content", ""))) for m in messages)
 
 
 class EventResponse(BaseModel):
@@ -138,15 +129,16 @@ class EventResponse(BaseModel):
 class StoryResponse(BaseModel):
     """Structured response from story narrator."""
 
-    node: Literal["memory_tool", "dialogue", "update_characters"] = Field(
-        description="Memory lookup, narrative reply, or character state update"
+    node: Literal["memory_tool", "dialogue"] = Field(
+        description="Memory lookup, or normal narrative reply"
     )
     response: str = Field(description="Narrative or reply (always fill this)")
-    character_ids: list[str] = Field(
+    character_commands: list[str] = Field(
         default_factory=list,
         description=(
-            "object_ids of characters whose state changed this turn. "
-            "Empty list unless node is update_characters."
+            "One plain-language line per character newly introduced or changed this turn "
+            "(e.g. 'Introduce a blacksmith named Gareth' or 'Odysseus just picked up a bow'). "
+            "Always name the character explicitly. No ids needed — just describe what happened."
         ),
     )
     add_event: bool = Field(

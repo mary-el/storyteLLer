@@ -43,7 +43,7 @@ class WorldObject(BaseObject):
     world: World = Field(default_factory=World)
 
 
-StoryStep = Literal["world", "characters", "story"]
+StoryStep = Literal["world", "story"]
 
 
 class StoryEvent(BaseModel):
@@ -94,11 +94,11 @@ class StorytellerState(State):
     story: NotRequired[Annotated[Optional[Story], _story_reducer]]
     phase: NotRequired[StoryStep]
     turn: NotRequired[int]
-    # Ephemeral routing metadata written by router_node / story_node, read by routing
-    # functions and sibling nodes; cleared after each turn.
+    # Ephemeral routing metadata written by story_node, read by routing functions
+    # and sibling nodes; cleared after each turn.
     _pending_node: NotRequired[str]
     _pending_response: NotRequired[str]
-    _pending_char_ids: NotRequired[list[str]]
+    _pending_character_commands: NotRequired[list[str]]
     _pending_add_event: NotRequired[bool]
     # Ephemeral fan-in fields written by archive_node, merged by finalize_turn_node.
     _turn_summary: NotRequired[str]

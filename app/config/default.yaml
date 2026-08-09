@@ -9,27 +9,8 @@ llm:
   # matching API key in OPENAI_API_KEY (see .env.example).
   model: openai/gpt-oss-120b
   base_url: https://api.groq.com/openai/v1
-  temperature: 0.3
+  temperature: 0.6
   max_tokens: 4096
-
-router:
-  max_trim_tokens: 1000
-  system_prompt: |
-    You are the Storyteller setup assistant. Your job is to help
-    the user add or refine characters until they say they want to begin the actual story.
-
-    Respond with JSON only:
-    - "node": one of "generate_character", "dialogue", "begin_story"
-    - "response": a short message to the user. ONLY fill this when node is "dialogue".
-      Use an empty string "" for "generate_character" and "begin_story" — do NOT write any story or narrative here.
-
-    Rules:
-    - Use "generate_character" when the user wants to create or add a character, or iterate  on a new character.
-    - Use "begin_story" when the user clearly asks to start the story, begin the narrative, or play (e.g. "begin", "start the story", "let's go").
-    - Use "dialogue" for normal chat, clarifications, or short replies that do not start character creation or the story.
-
-    If the latest message is a system event "SYSTEM_EVENT: OBJECT_CREATED", acknowledge the created object
-    briefly and ask what they want next (another character or to begin the story).
 
 story_narrator:
   max_trim_tokens: 1000
@@ -37,7 +18,10 @@ story_narrator:
     You are the story narrator. Continue the roleplaying narrative using the world and characters
     provided in the context. Keep the tone consistent; advance scenes when appropriate; invite the
     user to act or respond. Your messages shouldn't be too long: just a few sentences.
-    Don't decide for the user's character.
+    Don't make decisions for the user's character.
+
+    If there are no characters yet, propose the user to create one by describing their appearance, personality, and background.
+    If asked, create a character based on the user prompt. The character can be updated later.
 
     World description:
     {world}
@@ -47,21 +31,23 @@ story_narrator:
     {characters}
 
     Respond with JSON only — fields:
-    - "node": one of "dialogue", "memory_tool", or "update_characters"
+    - "node": one of "dialogue" or "memory_tool"
     - "response": your narrative or reply (always fill this)
-    - "character_ids": list of object_ids for characters whose state changed this turn.
-      Use an empty list [] when node is "dialogue" or "memory_tool".
-      When node is "update_characters", include the object_id(s) of all changed characters.
+    - "character_commands": one plain-language line per character newly introduced or changed
+      this turn — e.g. "Introduce a young stable boy named Timon" or "Odysseus just received a
+      bow from Athena". Always name the character explicitly (even if the narrative used a
+      pronoun/title). No ids needed — a dedicated agent resolves which character this is and
+      applies the change. Empty list [] when no character was introduced or changed this turn.
     - "add_event": true if a key event occurred this turn (new character, discovery, important conversation);
-    false for routine dialogue or mundane events with no lasting consequence.
+      false for routine dialogue or mundane events with no lasting consequence.
 
     Routing rules:
     - Use "dialogue" for normal narrative turns and reactions to the user.
     - Use "memory_tool" when you need to recall past events or stored details not visible in context,
       or when the user explicitly asks to list/recall memories.
-    - Use "update_characters" when one or more characters' state has clearly changed this turn —
-      inventory gained or lost, new relationship formed, injury, ability unlocked, etc.
-      List all changed characters in "character_ids". Still write the narrative in "response".
+    - Whenever a character is introduced, or an existing character's state clearly changes —
+      inventory gained or lost, new relationship formed, injury, ability unlocked, etc. —
+      list it in "character_commands" regardless of "node". Still write the narrative in "response".
 
 story_update:
   archive_prompt: |
@@ -80,8 +66,7 @@ story_update:
   world_patch_max_messages: 16
 
 object_generator:
-  extract_every_n_messages: 3
-  max_messages: 5
+  max_messages: 10
 
 memory_agent:
   system_prompt: |
@@ -98,21 +83,20 @@ memory_agent:
 
 agents:
   character:
-    generation_instructions: |
-      You are a character generator helper. Follow these instructions:
-      1. Review the conversation;
-      2. If human is satisfied with the character and tells it explicitly, or wants to create something else, return only the word "done".
-      3. Otherwise, (re)write a character description based on the human feedback or ask for more feedback.
-      Be concise, use the same language as the user. Write a plain text, not a JSON object.
-      Ask, if the user is satisfied with the character description or wants to change something.
-    extraction_instructions: |
-      Update existing character from the following conversation.
-      Always use the same language as the user!
-      Don't add any information that is not in the conversation.
-      Pay attention to both human and bot messages.
+    instructions: |
+      You maintain this roleplaying game's characters. Below (in <existing>) are the existing
+      characters, each tagged with its own id, plus one character change request for this turn.
+      - If the request refers to a character that already exists below, patch only the fields
+        that actually changed — leave the rest untouched. Use that character's exact id as
+        json_doc_id.
+      - If it's a brand-new character not listed below, fill in every field, grounded in the
+        conversation; where nothing specific is known yet, write a short, sensible detail
+        consistent with the world and story instead of leaving it "Unknown".
+      Always use the same language as the user! Don't add any information that is not in the
+      conversation. Pay attention to both human and bot messages.
       Only use existing fields. Do not add '/instance' prefix.
-      Example:
-      json_doc_id: Character
+      Patch example (existing character):
+      json_doc_id: <id of the existing character being changed>
       patches:
       - op: replace
           path: /appearance
@@ -121,6 +105,9 @@ agents:
           path: /personality
           value: <Description of the personality>
       ...
+
+      Character change request this turn:
+      {instruction}
   world:
     generation_instructions: |
       You are a world generator helper for the roleplaying game. Follow these instructions:

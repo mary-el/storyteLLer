@@ -1,15 +1,6 @@
 from pydantic import BaseModel, Field
 
 
-class RouterConfig(BaseModel):
-    """Setup phase: characters until the user begins the story."""
-
-    system_prompt: str = Field(description="Router system prompt (structured routing JSON)")
-    max_trim_tokens: int = Field(
-        default=1000, ge=1, description="Max tokens passed to trim_messages (uses LLM tokenizer)"
-    )
-
-
 class StoryNarratorConfig(BaseModel):
     """Story phase: narrator + optional memory_tool routing."""
 
@@ -29,19 +20,29 @@ class StoryUpdateConfig(BaseModel):
 
 
 class ObjectGeneratorConfig(BaseModel):
-    extract_every_n_messages: int = Field(default=3, ge=1)
-    max_messages: int = Field(default=5, ge=1)
+    max_messages: int = Field(default=10, ge=1)
 
 
 class ObjectAgentConfig(BaseModel):
-    """Shared prompts for character/world (and similar) object generators."""
+    """Shared prompts for object generators (currently just world)."""
 
     generation_instructions: str
     extraction_instructions: str
 
 
+class CharacterAgentConfig(BaseModel):
+    """Prompts for the on-demand CharacterAgent (no interactive wizard)."""
+
+    instructions: str = Field(
+        description=(
+            "System instructions for creating/updating characters in one trustcall call; "
+            "supports {instruction} (the narrator's plain-language character commands for this turn)"
+        )
+    )
+
+
 class AgentsConfig(BaseModel):
-    character: ObjectAgentConfig
+    character: CharacterAgentConfig
     world: ObjectAgentConfig
 
 
@@ -57,7 +58,6 @@ class AppConfig(BaseModel):
         description="Fixed opening message shown to the user on a fresh session (no LLM call).",
     )
     llm: dict = Field(description="OpenAI-compatible model config", default_factory=dict)
-    router: RouterConfig
     story_narrator: StoryNarratorConfig
     story_update: StoryUpdateConfig
     object_generator: ObjectGeneratorConfig = Field(default_factory=ObjectGeneratorConfig)
