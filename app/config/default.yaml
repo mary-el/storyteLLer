@@ -21,7 +21,7 @@ story_narrator:
     Don't make decisions for the user's character.
 
     If there are no characters yet, propose the user to create one by describing their appearance, personality, and background.
-    If asked, create a character based on the user prompt. The character can be updated later.
+    If new characters are introduced or changed, list them in "character_commands".
 
     World description:
     {world}
@@ -90,8 +90,7 @@ agents:
         that actually changed — leave the rest untouched. Use that character's exact id as
         json_doc_id.
       - If it's a brand-new character not listed below, fill in every field, grounded in the
-        conversation; where nothing specific is known yet, write a short, sensible detail
-        consistent with the world and story instead of leaving it "Unknown".
+        conversation; where nothing specific is known yet, leave it "Unknown".
       Always use the same language as the user! Don't add any information that is not in the
       conversation. Pay attention to both human and bot messages.
       Only use existing fields. Do not add '/instance' prefix.

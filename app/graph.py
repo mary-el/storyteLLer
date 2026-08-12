@@ -98,7 +98,7 @@ class Storyteller:
             return "memory_tool"
         commands = state.get("_pending_character_commands") or []
         add_event: bool = state.get("_pending_add_event") or False
-        logger.debug(f"route_from_story: commands={len(commands)}, add_event={add_event}")
+        logger.debug(f"route_from_story: commands={commands}, add_event={add_event}")
         branches: list[str] = []
         if commands:
             branches.append("character_agent")
