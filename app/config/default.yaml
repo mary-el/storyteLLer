@@ -7,13 +7,15 @@ greeting: |
 llm:
   # Any OpenAI-compatible endpoint works: set model + base_url and put the
   # matching API key in OPENAI_API_KEY (see .env.example).
-  model: openai/gpt-oss-120b
-  base_url: https://api.groq.com/openai/v1
+  model: gpt-5.4-mini
+  # base_url: https://api.groq.com/openai/v1
+  base_url: https://api.openai.com/v1
   temperature: 0.6
-  max_tokens: 4096
+  max_tokens: 65536
 
 story_narrator:
-  max_trim_tokens: 1000
+  max_trim_tokens: 32768
+  max_previous_events: 10
   system_prompt: |
     You are the story narrator. Continue the roleplaying narrative using the world and characters
     provided in the context. Keep the tone consistent; advance scenes when appropriate; invite the
@@ -29,6 +31,8 @@ story_narrator:
     {story_summary}
     Character list:
     {characters}
+    Previous events:
+    {events}
 
     Respond with JSON only — fields:
     - "node": one of "dialogue" or "memory_tool"
@@ -45,7 +49,9 @@ story_narrator:
     - Use "dialogue" for normal narrative turns and reactions to the user.
     - Use "memory_tool" when you need to recall past events or stored details not visible in context,
       or when the user explicitly asks to list/recall memories.
-    - Whenever a character is introduced, or an existing character's state clearly changes —
+    - Whenever a character missing from the list is mentioned, if they sound important enough,
+      add them to the list in "character_commands".
+    - Whenever an existing character's state clearly changes —
       inventory gained or lost, new relationship formed, injury, ability unlocked, etc. —
       list it in "character_commands" regardless of "node". Still write the narrative in "response".
 
@@ -60,15 +66,17 @@ story_update:
     Current title: {title}
     An important event occurred since the last record — describe it concisely in the 'event' field.
     Write a neutral 2-5 sentence summary. Include only events already in the transcript.
+    Summary must cover all the previous events, not just the recent ones.
     Update the title if the story has evolved significantly.
     Do not comment on object creation or other technical details.
-  max_trim_messages: 7
-  world_patch_max_messages: 16
+  max_trim_tokens: 16384
+  world_patch_max_tokens: 16384
 
 object_generator:
-  max_messages: 10
+  max_trim_tokens: 16384
 
 memory_agent:
+  max_trim_tokens: 16384
   system_prompt: |
     You are a memory management assistant.
     Decide whether the user wants to list stored memories or retrieve a specific memory by id.

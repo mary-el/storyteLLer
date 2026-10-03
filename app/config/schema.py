@@ -6,7 +6,12 @@ class StoryNarratorConfig(BaseModel):
 
     system_prompt: str = Field(description="Narrator system prompt (structured routing JSON)")
     max_trim_tokens: int = Field(
-        default=1000, ge=1, description="Max tokens passed to trim_messages (uses LLM tokenizer)"
+        default=1000, ge=1, description="Max tokens of conversation passed to the narrator"
+    )
+    max_previous_events: int = Field(
+        default=15,
+        ge=1,
+        description="How many recent story events to include in the narrator prompt",
     )
 
 
@@ -14,13 +19,25 @@ class StoryUpdateConfig(BaseModel):
     archive_prompt: str = Field(
         description="System message for archive node; uses {previous_summary}, {previous_events}, {transcript}, {title}"
     )
-    max_trim_messages: int = Field(default=24, ge=1)
-    world_patch_max_messages: int = Field(default=16, ge=1)
+    max_trim_tokens: int = Field(
+        default=8192,
+        ge=1,
+        description="Max tokens of transcript passed to the archive prompt",
+    )
+    world_patch_max_tokens: int = Field(
+        default=8192,
+        ge=1,
+        description="Max tokens of conversation passed to the character agent",
+    )
     event_history_length: int = Field(default=10, ge=1)
 
 
 class ObjectGeneratorConfig(BaseModel):
-    max_messages: int = Field(default=10, ge=1)
+    max_trim_tokens: int = Field(
+        default=8192,
+        ge=1,
+        description="Max tokens of conversation kept during world generation",
+    )
 
 
 class ObjectAgentConfig(BaseModel):
@@ -49,6 +66,11 @@ class AgentsConfig(BaseModel):
 class MemoryAgentConfig(BaseModel):
     system_prompt: str = Field(
         description="Prompt for classifying memory list/get intent and kind from the conversation"
+    )
+    max_trim_tokens: int = Field(
+        default=8192,
+        ge=1,
+        description="Max tokens of conversation passed when classifying a memory request",
     )
 
 

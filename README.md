@@ -142,3 +142,10 @@ uv run pre-commit run --all-files
 ```
 
 CI runs both on every push and pull request.
+
+## Future ideas
+
+- Long-term memory via the MCP memory server (`@modelcontextprotocol/server-memory`)
+- Character Catalogue and Worlds Catalogue to review, update, and reuse
+- Rewrite a previous message and continue the dialogue from there
+- Character portrait generation from a description

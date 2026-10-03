@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Literal, Optional
 
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, trim_messages
+from langchain_core.messages import AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph
 from langgraph.store.base import BaseStore
@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from app.memory import get_memory, list_memories
 from app.state.schemas import Story, StorytellerState, coerce_story
-from app.utils import logger
+from app.utils import logger, trim_history
 
 
 class _MemoryIntent(BaseModel):
@@ -102,28 +102,18 @@ class MemoryAgent:
         *,
         system_prompt: str,
         memory_store: Optional[BaseStore] = None,
-        max_trim_messages: int = 12,
+        max_trim_tokens: int = 8192,
     ) -> None:
         self.llm = llm
         self.system_prompt = system_prompt
         self.memory_store = memory_store
-        self.max_trim_messages = max_trim_messages
+        self.max_trim_tokens = max_trim_tokens
         self.graph = self.build_graph()
-
-    def _trim_conversation(self, messages: list[BaseMessage]) -> list[BaseMessage]:
-        return trim_messages(
-            messages,
-            max_tokens=self.max_trim_messages,
-            token_counter=len,
-            strategy="last",
-            start_on="human",
-            include_system=False,
-        )
 
     async def _infer_intent(self, state: StorytellerState) -> _MemoryIntent:
         logger.debug("Running memory agent")
         messages = state.get("messages", [])
-        trimmed = self._trim_conversation(messages)
+        trimmed = trim_history(messages, self.max_trim_tokens)
 
         system = SystemMessage(content=self.system_prompt)
 

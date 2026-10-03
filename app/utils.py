@@ -4,7 +4,7 @@ import sys
 from typing import Literal, TypeVar
 
 import tiktoken
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, trim_messages
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -97,14 +97,30 @@ def visible_response(messages: list) -> str:
     for msg in reversed(messages):
         if not isinstance(msg, AIMessage):
             continue
-        content = getattr(msg, "content", "") or ""
-        return strip_thinking(content)
+        return strip_thinking(message_text(msg))
     return ""
 
 
 def count_tokens(messages: list) -> int:
     """Count tokens using cl100k_base (GPT-4 family encoding) as a safe fallback."""
     return sum(4 + len(_TOKEN_ENCODING.encode(getattr(m, "content", ""))) for m in messages)
+
+
+def trim_history(
+    messages: list,
+    max_tokens: int,
+    *,
+    include_system: bool = False,
+) -> list:
+    """Keep the newest messages that fit in ``max_tokens``."""
+    return trim_messages(
+        messages,
+        max_tokens=max_tokens,
+        token_counter=count_tokens,
+        strategy="last",
+        start_on="human",
+        include_system=include_system,
+    )
 
 
 class EventResponse(BaseModel):

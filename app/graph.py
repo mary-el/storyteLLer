@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import dotenv
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, trim_messages
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -20,11 +20,11 @@ from app.utils import (
     STRUCTURED_OUTPUT_ERROR,
     EventResponse,
     StoryResponse,
-    count_tokens,
     invoke_structured,
     logger,
     message_text,
     strip_thinking,
+    trim_history,
     visible_response,
 )
 
@@ -55,6 +55,7 @@ class Storyteller:
             self.llm,
             system_prompt=self.config.memory_agent.system_prompt,
             memory_store=memory_store,
+            max_trim_tokens=self.config.memory_agent.max_trim_tokens,
         )
         self.world_generator = WorldGenerator(
             self.llm,
@@ -108,15 +109,24 @@ class Storyteller:
 
     # ── story context ──────────────────────────────────────────────────────────
 
-    def _get_story_context(self, story: Story) -> str:
-        characters = "\n".join(
+    def _format_characters(self, story: Story) -> str:
+        return "\n".join(
             f"Character ({co.object_id}):\n{co.model_dump_json(indent=2)}"
             for co in story.characters
         )
+
+    def _format_previous_events(self, story: Story) -> str:
+        if not story.events:
+            return "None yet."
+        limit = self.config.story_narrator.max_previous_events
+        return "\n".join(f"- (turn {e.turn}) {e.event}" for e in story.events[-limit:])
+
+    def _get_story_context(self, story: Story) -> str:
         return self.config.story_narrator.system_prompt.format(
             world=story.world.model_dump_json(indent=2),
             story_summary=story.summary,
-            characters=characters,
+            characters=self._format_characters(story),
+            events=self._format_previous_events(story),
         )
 
     # ── nodes ──────────────────────────────────────────────────────────────────
@@ -127,12 +137,9 @@ class Storyteller:
     async def story_node(self, state: StorytellerState) -> StorytellerState:
         story = state.get("story")
         context = self._get_story_context(story)
-        messages = trim_messages(
+        messages = trim_history(
             state["messages"],
-            max_tokens=self.story_max_len,
-            token_counter=count_tokens,
-            strategy="last",
-            start_on="human",
+            self.story_max_len,
             include_system=True,
         )
         logger.debug("routing to story narrator")
@@ -165,13 +172,9 @@ class Storyteller:
 
         add_event: bool = state.get("_pending_add_event") or False
 
-        messages = trim_messages(
+        messages = trim_history(
             state.get("messages", []),
-            max_tokens=self.config.story_update.max_trim_messages,
-            token_counter=len,
-            strategy="last",
-            start_on="human",
-            include_system=False,
+            self.config.story_update.max_trim_tokens,
         )
         transcript_lines: list[str] = []
         for m in messages:
@@ -182,15 +185,9 @@ class Storyteller:
             transcript_lines.append(f"{role}: {text}")
         transcript = "\n".join(transcript_lines)
 
-        previous_events = (
-            "\n".join(f"- (turn {e.turn}) {e.event}" for e in story.events)
-            if story.events
-            else "None yet."
-        )
-
         archive_prompt = self.config.story_update.archive_prompt.format(
             previous_summary=story.summary,
-            previous_events=previous_events,
+            previous_events=self._format_previous_events(story),
             transcript=transcript,
             title=story.title,
         )

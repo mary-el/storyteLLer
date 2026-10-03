@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from typing import Optional
 
-from langchain_core.messages import AIMessage, SystemMessage, trim_messages
+from langchain_core.messages import AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.store.base import BaseStore
 from trustcall import create_extractor
 
 from app.config.schema import AppConfig
 from app.state.schemas import Character, CharacterObject, StorytellerState
-from app.utils import logger, message_text
+from app.utils import logger, message_text, trim_history
 
 
 class CharacterAgent:
@@ -31,7 +31,7 @@ class CharacterAgent:
     ) -> None:
         self.memory_store = memory_store
         self.instructions = app_config.agents.character.instructions
-        self.max_trim_messages = app_config.story_update.world_patch_max_messages
+        self.max_trim_tokens = app_config.story_update.world_patch_max_tokens
         self.extractor = create_extractor(
             llm, tools=[Character], tool_choice="required", enable_inserts=True
         )
@@ -45,14 +45,7 @@ class CharacterAgent:
         )
 
     def _trimmed_context(self, state: StorytellerState) -> list:
-        messages = trim_messages(
-            state.get("messages", []),
-            max_tokens=self.max_trim_messages,
-            token_counter=len,
-            strategy="last",
-            start_on="human",
-            include_system=False,
-        )
+        messages = trim_history(state.get("messages", []), self.max_trim_tokens)
         return [
             AIMessage(content=message_text(m)) if isinstance(m, AIMessage) else m for m in messages
         ]

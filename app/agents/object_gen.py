@@ -3,13 +3,7 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 import dotenv
-from langchain_core.messages import (
-    AIMessage,
-    BaseMessage,
-    HumanMessage,
-    SystemMessage,
-    trim_messages,
-)
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
@@ -20,7 +14,7 @@ from trustcall import create_extractor
 
 from app.config.schema import AppConfig, ObjectAgentConfig
 from app.state.schemas import StorytellerState
-from app.utils import logger, split_thinking, strip_thinking
+from app.utils import logger, split_thinking, strip_thinking, trim_history
 
 dotenv.load_dotenv()
 
@@ -59,7 +53,7 @@ class ObjectGenerator(ABC):
         self.langdev = langdev
         self.generation_instructions = agent.generation_instructions
         self.extraction_instructions = agent.extraction_instructions
-        self.max_messages = og.max_messages
+        self.max_trim_tokens = og.max_trim_tokens
         self.memory_store = memory_store
         # Create extractor using the object class
         self.trustcall_extractor = self._create_extractor()
@@ -201,19 +195,12 @@ class ObjectGenerator(ABC):
         }
 
     def trim_messages(self, messages: list[BaseMessage]):
-        """Trim the messages to the max messages, stripping model thinking from AIMessages."""
+        """Trim the messages to the token budget, stripping model thinking from AIMessages."""
         cleaned = [
             AIMessage(content=strip_thinking(m.content)) if isinstance(m, AIMessage) else m
             for m in messages
         ]
-        return trim_messages(
-            cleaned,
-            max_tokens=self.max_messages,
-            token_counter=len,
-            strategy="last",
-            start_on="human",
-            include_system=False,
-        )
+        return trim_history(cleaned, self.max_trim_tokens)
 
     def build_graph(self):
         """Build the graph"""
