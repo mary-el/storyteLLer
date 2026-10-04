@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-from typing import Optional
-
 from langchain_core.messages import AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from langgraph.store.base import BaseStore
 from trustcall import create_extractor
 
 from app.config.schema import AppConfig
@@ -25,11 +22,9 @@ class CharacterAgent:
     def __init__(
         self,
         llm: ChatOpenAI,
-        memory_store: Optional[BaseStore] = None,
         *,
         app_config: AppConfig,
     ) -> None:
-        self.memory_store = memory_store
         self.instructions = app_config.agents.character.instructions
         self.max_trim_tokens = app_config.story_update.world_patch_max_tokens
         self.extractor = create_extractor(
@@ -84,7 +79,6 @@ class CharacterAgent:
             return {}
 
         characters = list(story.characters)
-        namespace = (state.get("user_id", "default"), "memories")
         context_messages = self._trimmed_context(state)
         changed = False
 
@@ -112,8 +106,6 @@ class CharacterAgent:
                 characters.append(obj)
                 action = "created"
             changed = True
-            if self.memory_store:
-                await self.memory_store.aput(namespace, obj.object_id, obj)
             logger.debug(f"CharacterAgent: {action} {obj.object_id} ({character.name!r})")
 
         if not changed:

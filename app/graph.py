@@ -1,4 +1,3 @@
-import uuid
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -7,15 +6,13 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command
 
 from app import persistence
 from app.agents.character_agent import CharacterAgent
-from app.agents.memory_agent import MemoryAgent
 from app.agents.world_gen import WorldGenerator
 from app.config import AppConfig, load_app_config
-from app.state.schemas import Story, StoryEvent, StorytellerState, WorldObject
+from app.state.schemas import Story, StoryEvent, StorytellerState
 from app.utils import (
     STRUCTURED_OUTPUT_ERROR,
     EventResponse,
@@ -35,7 +32,6 @@ class Storyteller:
     def __init__(
         self,
         langdev: bool = False,
-        memory_store: Optional[InMemoryStore] = None,
         config: Optional[AppConfig] = None,
     ) -> None:
         self.config = config or load_app_config()
@@ -44,23 +40,14 @@ class Storyteller:
         )
         self.llm = ChatOpenAI(**self.config.llm)
         self.checkpointer = MemorySaver() if not langdev else None
-        self.memory_store = memory_store
         self.langdev = langdev
         self.character_agent = CharacterAgent(
             self.llm,
-            memory_store,
             app_config=self.config,
-        )
-        self.memory_agent = MemoryAgent(
-            self.llm,
-            system_prompt=self.config.memory_agent.system_prompt,
-            memory_store=memory_store,
-            max_trim_tokens=self.config.memory_agent.max_trim_tokens,
         )
         self.world_generator = WorldGenerator(
             self.llm,
             self.checkpointer,
-            memory_store,
             langdev=langdev,
             app_config=self.config,
         )
@@ -94,9 +81,6 @@ class Storyteller:
         return "story"
 
     def route_from_story(self, state: StorytellerState) -> str | list[str]:
-        node = state.get("_pending_node", "dialogue")
-        if node == "memory_tool":
-            return "memory_tool"
         commands = state.get("_pending_character_commands") or []
         add_event: bool = state.get("_pending_add_event") or False
         logger.debug(f"route_from_story: commands={commands}, add_event={add_event}")
@@ -149,14 +133,12 @@ class Storyteller:
         except Exception as e:
             logger.error(f"story_node failed: {e}")
             response = StoryResponse(
-                node="dialogue",
                 response=STRUCTURED_OUTPUT_ERROR,
                 character_commands=[],
                 add_event=False,
             )
         return {
             "messages": [AIMessage(content=response.response)],
-            "_pending_node": response.node,
             "_pending_response": response.response,
             "_pending_character_commands": response.character_commands,
             "_pending_add_event": response.add_event,
@@ -239,13 +221,6 @@ class Storyteller:
         if new_event:
             stamped = StoryEvent(turn=turn, event=new_event.event)
             patch["events"] = [*story.events, stamped]
-            if self.memory_store:
-                namespace = (state.get("user_id", "default"), "events")
-                await self.memory_store.aput(
-                    namespace,
-                    str(uuid.uuid4()),
-                    {"turn": stamped.turn, "event": stamped.event},
-                )
             logger.debug(f"finalize_turn_node: archived event at turn {turn}: {stamped.event!r}")
         if patch:
             updates["story"] = story.model_copy(update=patch)
@@ -276,7 +251,6 @@ class Storyteller:
     def _add_nodes(self, graph: StateGraph) -> None:
         graph.add_node("greeting", self.greeting_node)
         graph.add_node("story", self.story_node)
-        graph.add_node("memory_tool", self.memory_agent.graph)
         graph.add_node("archive", self.archive_node)
         graph.add_node("character_agent", self.character_agent.run)
         graph.add_node("generate_world", self.world_generator.graph)
@@ -305,9 +279,8 @@ class Storyteller:
         graph.add_conditional_edges(
             "story",
             self.route_from_story,
-            ["memory_tool", "archive", "character_agent", "finalize_turn"],
+            ["archive", "character_agent", "finalize_turn"],
         )
-        graph.add_edge("memory_tool", "story")
         graph.add_edge("archive", "finalize_turn")
         graph.add_edge("character_agent", "finalize_turn")
         graph.add_edge("finalize_turn", END)
@@ -406,18 +379,4 @@ class Storyteller:
                 "user_id": user_id,
             },
         )
-
-        # Rebuild InMemoryStore so the memory agent can look up objects and events.
-        if self.memory_store:
-            namespace_mem = (user_id, "memories")
-            namespace_ev = (user_id, "events")
-            if story.world:
-                wo = WorldObject(world=story.world)
-                await self.memory_store.aput(namespace_mem, wo.object_id, wo.model_dump())
-            for co in story.characters:
-                await self.memory_store.aput(namespace_mem, co.object_id, co.model_dump())
-            for ev in story.events:
-                await self.memory_store.aput(
-                    namespace_ev, str(uuid.uuid4()), {"turn": ev.turn, "event": ev.event}
-                )
         logger.info(f"Loaded save '{story.title}' (phase={phase}, turn={turn})")

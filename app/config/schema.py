@@ -2,7 +2,7 @@ from pydantic import BaseModel, Field
 
 
 class StoryNarratorConfig(BaseModel):
-    """Story phase: narrator + optional memory_tool routing."""
+    """Story phase: narrator prompt and history limits."""
 
     system_prompt: str = Field(description="Narrator system prompt (structured routing JSON)")
     max_trim_tokens: int = Field(
@@ -63,17 +63,6 @@ class AgentsConfig(BaseModel):
     world: ObjectAgentConfig
 
 
-class MemoryAgentConfig(BaseModel):
-    system_prompt: str = Field(
-        description="Prompt for classifying memory list/get intent and kind from the conversation"
-    )
-    max_trim_tokens: int = Field(
-        default=8192,
-        ge=1,
-        description="Max tokens of conversation passed when classifying a memory request",
-    )
-
-
 class AppConfig(BaseModel):
     greeting: str = Field(
         default="Welcome to StoryteLLer! Let's build your world. Describe the setting you want to play in.",
@@ -84,5 +73,4 @@ class AppConfig(BaseModel):
     story_update: StoryUpdateConfig
     object_generator: ObjectGeneratorConfig = Field(default_factory=ObjectGeneratorConfig)
     agents: AgentsConfig
-    memory_agent: MemoryAgentConfig
     saves_dir: str = "saves"

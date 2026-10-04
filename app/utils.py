@@ -1,7 +1,7 @@
 import json
 import re
 import sys
-from typing import Literal, TypeVar
+from typing import TypeVar
 
 import tiktoken
 from langchain_core.messages import AIMessage, trim_messages
@@ -145,9 +145,6 @@ class EventResponse(BaseModel):
 class StoryResponse(BaseModel):
     """Structured response from story narrator."""
 
-    node: Literal["memory_tool", "dialogue"] = Field(
-        description="Memory lookup, or normal narrative reply"
-    )
     response: str = Field(description="Narrative or reply (always fill this)")
     character_commands: list[str] = Field(
         default_factory=list,

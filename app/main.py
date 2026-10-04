@@ -5,7 +5,6 @@ import traceback
 from datetime import datetime
 
 import dotenv
-from langgraph.store.memory import InMemoryStore
 
 from app import persistence
 from app.graph import Storyteller
@@ -137,10 +136,7 @@ async def main(user_id: str = "1") -> None:
     Args:
         user_id: The user ID for the session
     """
-    in_memory_store = InMemoryStore()
-
-    # Setup
-    storyteller = Storyteller(memory_store=in_memory_store)
+    storyteller = Storyteller()
 
     # Run interactive conversation
     await interactive_conversation(storyteller, user_id)

@@ -7,8 +7,6 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
-from langgraph.store.base import BaseStore
-from langgraph.store.memory import InMemoryStore
 from langgraph.types import interrupt
 from trustcall import create_extractor
 
@@ -40,7 +38,6 @@ class ObjectGenerator(ABC):
         self,
         llm: ChatOpenAI,
         checkpointer: Optional[MemorySaver] = None,
-        memory_store: Optional[InMemoryStore] = None,
         langdev: bool = False,
         *,
         app_config: AppConfig,
@@ -54,7 +51,6 @@ class ObjectGenerator(ABC):
         self.generation_instructions = agent.generation_instructions
         self.extraction_instructions = agent.extraction_instructions
         self.max_trim_tokens = og.max_trim_tokens
-        self.memory_store = memory_store
         # Create extractor using the object class
         self.trustcall_extractor = self._create_extractor()
         self.graph = self.build_graph()
@@ -83,22 +79,16 @@ class ObjectGenerator(ABC):
         """Return the field name in state (e.g., 'character', 'world')"""
         raise NotImplementedError("Subclasses must implement this property")
 
-    async def initialize_object_node(self, state: StorytellerState, store: BaseStore = None):
+    async def initialize_object_node(self, state: StorytellerState):
         """Initialize the object with an ID if it doesn't exist."""
-        store = store or self.memory_store
-        logger.debug(f"Initializing object with store: {store}")
         obj = self.object_class()
-        namespace = (state.get("user_id", "default"), "memories")
-        if store:
-            await store.aput(namespace, obj.object_id, obj)
         logger.debug(f"Object initialized: {obj}")
         return {"generated_object": obj}
 
-    async def extract(self, state: StorytellerState, store: BaseStore = None):
+    async def extract(self, state: StorytellerState):
         """
         Extract the object from the conversation.
         """
-        store = store or self.memory_store
         logger.debug(f"Extracting object {state.get('user_id', 'default')} from description")
         messages = state.get("messages", [])
         # Trim messages to avoid token limits and potential serialization issues
@@ -127,20 +117,14 @@ class ObjectGenerator(ABC):
             logger.debug(f"Object response: {object_response}")
             # Set attribute directly since existing_object is a Pydantic model, not a dict
             setattr(existing_object, self.object_field_name, object_response)
-            # Save to memory store using namespace and object ID
-            namespace = (state.get("user_id", "default"), "memories")
-            if store:
-                await store.aput(namespace, existing_object.object_id, existing_object)
-            logger.debug(
-                f"Object saved to store: {namespace}, {existing_object.object_id}, {existing_object}"
-            )
+            logger.debug(f"Object extracted: {existing_object.object_id}, {existing_object}")
             # Write the object to state
             return {"generated_object": existing_object}
         except Exception as e:
             logger.error(f"Error extracting object: {e}")
             return {}
 
-    async def human_feedback(self, state: StorytellerState, store: BaseStore = None):
+    async def human_feedback(self, state: StorytellerState):
         """Node that interrupts to request human feedback, returns feedback on resume"""
         logger.debug("Requesting human feedback via interrupt()")
         # interrupt() will pause execution and wait for Command(resume=...)
@@ -161,7 +145,7 @@ class ObjectGenerator(ABC):
         # Add feedback as HumanMessage to continue the conversation
         return {"messages": [HumanMessage(content=feedback)]}
 
-    def should_extract(self, state: StorytellerState, store: BaseStore = None):
+    def should_extract(self, state: StorytellerState):
         """Extract exactly once, right before finalizing; otherwise keep gathering feedback."""
         status = state.get("status", "in_progress")
         if status == "created":
@@ -171,7 +155,7 @@ class ObjectGenerator(ABC):
         logger.debug("Continuing to human feedback")
         return "human_feedback"
 
-    async def generate_description(self, state: StorytellerState, store: BaseStore = None):
+    async def generate_description(self, state: StorytellerState):
         """Generate a description of the object."""
         messages = self.trim_messages(state.get("messages", []))
         start_time = time.time()

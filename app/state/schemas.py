@@ -96,7 +96,6 @@ class StorytellerState(State):
     turn: NotRequired[int]
     # Ephemeral routing metadata written by story_node, read by routing functions
     # and sibling nodes; cleared after each turn.
-    _pending_node: NotRequired[str]
     _pending_response: NotRequired[str]
     _pending_character_commands: NotRequired[list[str]]
     _pending_add_event: NotRequired[bool]

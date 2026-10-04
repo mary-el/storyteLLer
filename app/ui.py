@@ -10,7 +10,6 @@ from datetime import datetime
 import dotenv
 import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage
-from langgraph.store.memory import InMemoryStore
 
 from app import persistence
 from app.graph import Storyteller
@@ -26,10 +25,8 @@ _USER_ID = "1"
 
 
 def _init_session() -> None:
-    if "store" not in st.session_state:
-        st.session_state.store = InMemoryStore()
     if "storyteller" not in st.session_state:
-        st.session_state.storyteller = Storyteller(memory_store=st.session_state.store)
+        st.session_state.storyteller = Storyteller()
     if "messages" not in st.session_state:
         st.session_state.messages: list[dict] = []
     if "bootstrapped" not in st.session_state:
@@ -92,10 +89,8 @@ def _load_save(save_meta: dict) -> None:
     """Load a save file into a fresh Storyteller and restore chat history."""
     save_data = persistence.load_story(save_meta["path"])
     active_thread_id = save_data.get("thread_id") or str(uuid.uuid4())
-    new_store = InMemoryStore()
-    new_storyteller = Storyteller(memory_store=new_store)
+    new_storyteller = Storyteller()
     asyncio.run(new_storyteller.load(save_data, _USER_ID, active_thread_id))
-    st.session_state.store = new_store
     st.session_state.storyteller = new_storyteller
     st.session_state.thread_id = active_thread_id
     st.session_state.messages = _messages_from_save(save_data)

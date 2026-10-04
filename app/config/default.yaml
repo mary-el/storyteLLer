@@ -35,7 +35,6 @@ story_narrator:
     {events}
 
     Respond with JSON only — fields:
-    - "node": one of "dialogue" or "memory_tool"
     - "response": your narrative or reply (always fill this)
     - "character_commands": one plain-language line per character newly introduced or changed
       this turn — e.g. "Introduce a young stable boy named Timon" or "Odysseus just received a
@@ -44,16 +43,14 @@ story_narrator:
       applies the change. Empty list [] when no character was introduced or changed this turn.
     - "add_event": true if a key event occurred this turn (new character, discovery, important conversation);
       false for routine dialogue or mundane events with no lasting consequence.
+      New events should be added every 3-5 turns, not every turn.
 
-    Routing rules:
-    - Use "dialogue" for normal narrative turns and reactions to the user.
-    - Use "memory_tool" when you need to recall past events or stored details not visible in context,
-      or when the user explicitly asks to list/recall memories.
+    Character updates:
     - Whenever a character missing from the list is mentioned, if they sound important enough,
       add them to the list in "character_commands".
     - Whenever an existing character's state clearly changes —
       inventory gained or lost, new relationship formed, injury, ability unlocked, etc. —
-      list it in "character_commands" regardless of "node". Still write the narrative in "response".
+      list it in "character_commands". Still write the narrative in "response".
 
 story_update:
   archive_prompt: |
@@ -74,20 +71,6 @@ story_update:
 
 object_generator:
   max_trim_tokens: 16384
-
-memory_agent:
-  max_trim_tokens: 16384
-  system_prompt: |
-    You are a memory management assistant.
-    Decide whether the user wants to list stored memories or retrieve a specific memory by id.
-    - If user asks to see/list memories: action='list'.
-    - If user asks for a specific memory and provides/mentions an id: action='get' and extract memory_id.
-    - Set kind: use 'world' if they only ask about worlds/settings.
-      Use 'character' if they only ask about characters/personas.
-      Use 'all' for generic 'what do we have' / list everything.
-    - Past story events are stored under namespace ("user_id", "events"). If the user asks about
-      past events or story history, set namespace to that tuple.
-    - Otherwise, leave namespace null (defaults to ("user_id", "memories")).
 
 agents:
   character:

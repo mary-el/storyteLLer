@@ -6,14 +6,14 @@
 
 ![](media/storyteller_img.png)
 
-Lightweight LangGraph-based storytelling assistant: build a **world**, then run the **story** with rolling memory and optional memory lookup. Characters are created and updated on the fly, the moment they're mentioned.
+Lightweight LangGraph-based storytelling assistant: build a **world**, then run the **story** with rolling memory. Characters are created and updated on the fly, the moment they're mentioned.
 
 ## Highlights
 
-- **Multi-agent LangGraph architecture** — a top-level graph with a story narrator, character agent, memory agent, and `story_update` archivist, all driven by structured JSON routing decisions.
+- **Multi-agent LangGraph architecture** — a top-level graph with a story narrator, character agent, and `story_update` archivist, driven by structured JSON routing decisions.
 - **Human-in-the-loop world generation** — world creation runs as a reusable subgraph (`ObjectGenerator`) that iterates on user feedback and extracts a structured Pydantic object via [trustcall](https://github.com/hinthornw/trustcall) JSON-patching.
 - **On-demand character agent** — characters are created and patched in the background (trustcall extraction, no interactive wizard) whenever the narrator mentions a new or changed character; the model itself resolves which character each mention refers to, using the full character list.
-- **Two memory layers** — a `Story` aggregate in graph state (world, characters, rolling summary, events) plus an `InMemoryStore` the narrator can query mid-story through the memory agent.
+- **Rolling story memory** — a `Story` aggregate in graph state (world, characters, rolling summary, events) that the narrator sees each turn and that is saved to disk.
 - **Dual interfaces** — an interactive CLI and a Streamlit chat UI, both with auto-save/load persistence.
 - **Provider-agnostic LLM setup** — works with any OpenAI-compatible endpoint (Groq, OpenAI, local servers) via a single YAML config.
 
@@ -39,7 +39,7 @@ OPENAI_API_KEY=your_key_here
 
 The default config points at Groq's OpenAI-compatible API (`openai/gpt-oss-120b`). Any OpenAI-compatible provider works — edit the `llm` section (`model`, `base_url`) in [`app/config/default.yaml`](app/config/default.yaml) and set `OPENAI_API_KEY` to that provider's key.
 
-Configuration lives in [`app/config/default.yaml`](app/config/default.yaml). Override the path with `APP_CONFIG_PATH`. Key sections: `llm`, `story_narrator`, `story_update`, `agents`, `memory_agent`, `saves_dir`.
+Configuration lives in [`app/config/default.yaml`](app/config/default.yaml). Override the path with `APP_CONFIG_PATH`. Key sections: `llm`, `story_narrator`, `story_update`, `agents`, `saves_dir`.
 
 ## Run
 
@@ -69,7 +69,7 @@ World creation starts automatically on first load (same bootstrap as the CLI).
 
 Stories are **auto-saved** after each turn once a world exists. Files go to `saves/<story_id>.json` (configurable via `saves_dir` in config). Each file holds the full graph state: story aggregate, messages, phase, turn, and thread id.
 
-On load, checkpoint state and the in-memory store are rebuilt from the saved `Story` so memory lookup keeps working.
+On load, checkpoint state is rebuilt from the saved `Story`.
 
 ## Pipeline overview
 
@@ -77,21 +77,13 @@ On load, checkpoint state and the in-memory store are rebuilt from the saved `St
 2. **Story** — Every turn after that goes to the `story` narrator, which always writes a reply and may additionally flag:
    - **`character_commands`** — one plain-language line per character newly introduced or changed this turn (no ids); routes (in parallel with the below) to `character_agent`, which resolves each command in its own trustcall call against the full character list and either patches an existing character or creates a new one.
    - **`add_event`** — a key event worth archiving; routes (in parallel) to `archive`.
-   - **`node: memory_tool`** — list or fetch world/character/event data; loops back to `story` for a final reply, skipping `story_update` for that pass.
-   - Otherwise (`node: dialogue`, no mentions, no event) — falls straight through to `finalize_turn`.
+   - Otherwise (no character changes, no event) — falls straight through to `finalize_turn`.
 
 `character_agent` and `archive` fan back into `finalize_turn`, which increments `turn` and merges in the summary/event.
 
 ## Memory
 
-Two layers:
-
-| Layer | Where | What |
-| --- | --- | --- |
-| **Story aggregate** | `Story` in graph state | `world`, `characters`, `summary`, `events` |
-| **Store** | `InMemoryStore` | `(user_id, "memories")` — world/character objects; `(user_id, "events")` — per-turn event records |
-
-After each narrative turn, `story_update` refreshes `Story.summary`, appends a `StoryEvent`, and writes the event to the store. The narrator can call `memory_tool` proactively to recall past events or character details not in context.
+The `Story` aggregate on graph state holds `world`, `characters`, `summary`, and `events`. After a turn flagged with `add_event`, `archive` refreshes `Story.summary` and appends a `StoryEvent`. The narrator sees the world, the character list, the rolling summary, and recent events in its prompt each turn. The same aggregate is what gets written to the save file.
 
 During story play, `character_agent` handles each of the narrator's plain-language commands with its own trustcall call (inserts enabled) — passing every existing character (tagged with its own id) alongside it — so the model decides, per command, whether to patch an existing character or create a new one. Processing sequentially also means a later command in the same turn can see a character a prior command in that turn just created.
 
@@ -106,10 +98,8 @@ flowchart TD
   generate_world --> finalize_world
   finalize_world --> story
   greeting --> END
-  story -->|memory_tool| memory_tool
   story -->|character_commands| character_agent
   story -->|add_event| archive
-  memory_tool --> story
   character_agent --> finalize_turn
   archive --> finalize_turn
   finalize_turn --> END
@@ -149,3 +139,4 @@ CI runs both on every push and pull request.
 - Character Catalogue and Worlds Catalogue to review, update, and reuse
 - Rewrite a previous message and continue the dialogue from there
 - Character portrait generation from a description
+- Gradio interface alongside the CLI and Streamlit UI
