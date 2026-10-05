@@ -1,4 +1,3 @@
-import json
 import re
 import sys
 from typing import TypeVar
@@ -57,15 +56,6 @@ def split_thinking(text: str) -> tuple[str | None, str]:
 
 def strip_thinking(text: str) -> str:
     return _RE.sub("", text).strip() if isinstance(text, str) else (str(text) if text else "")
-
-
-def parse_last_json(messages: list) -> dict:
-    """Parse JSON from the last message's content; return {} on any failure."""
-    last = messages[-1] if messages else None
-    try:
-        return json.loads(getattr(last, "content", "{}"))
-    except (json.JSONDecodeError, AttributeError, TypeError):
-        return {}
 
 
 def message_text(msg) -> str:
