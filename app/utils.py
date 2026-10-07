@@ -45,6 +45,12 @@ _RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
 _TOKEN_ENCODING = tiktoken.get_encoding("cl100k_base")
 
 
+def print_message(message: str) -> None:
+    print("\n--- Response ---")
+    print(message)
+    print("--- End Response ---\n")
+
+
 def split_thinking(text: str) -> tuple[str | None, str]:
     """Return (thinking, visible_text).  thinking is None when no block is found."""
     if not isinstance(text, str):
