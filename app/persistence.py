@@ -74,6 +74,14 @@ def list_saves(saves_dir: str | Path) -> list[dict[str, Any]]:
     return saves
 
 
+def find_save(saves_dir: str | Path, story_id: str) -> Path | None:
+    """Return the save file for story_id, or None. Only matches files list_saves knows about."""
+    for save in list_saves(saves_dir):
+        if save["story_id"] == story_id:
+            return Path(save["path"])
+    return None
+
+
 def reconstruct_messages(raw_messages: list[dict]) -> list:
     """Deserialize a list of message dicts back into LangChain message objects."""
     return messages_from_dict(raw_messages)

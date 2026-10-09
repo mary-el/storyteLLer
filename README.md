@@ -65,6 +65,31 @@ The sidebar shows phase, world, characters, rolling summary, and events. Actions
 
 World creation starts automatically on first load (same bootstrap as the CLI).
 
+**HTTP API**
+
+```bash
+uv run uvicorn app.api:app --reload
+```
+
+A FastAPI wrapper around `Storyteller.init` / `tell` / `load`. Interactive docs are at `http://localhost:8000/docs`. An optional `X-User-Id` header selects the user (default `1`). CORS origins come from `STORYTELLER_CORS_ORIGINS` (comma-separated, default `http://localhost:5173`).
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/threads` | Start a thread; returns `thread_id` and the greeting |
+| `POST` | `/threads/{thread_id}/turns` | Send `{"message": "..."}`; streams the turn over SSE |
+| `GET` | `/threads/{thread_id}/state` | Phase, turn, story, pending prompt, chat history |
+| `GET` | `/saves` | List saved stories, newest first |
+| `POST` | `/saves/{story_id}/resume` | Load a save into a new thread |
+
+A turn streams `node` events as graph steps finish, then one `message` event (`text`, `awaiting_feedback`) or an `error`, then `done`. Sending a second turn to a thread while one is running returns `409`.
+
+```bash
+curl -N -X POST localhost:8000/threads/<thread_id>/turns \
+  -H "Content-Type: application/json" -d '{"message": "A foggy fishing village"}'
+```
+
+Threads live in memory and are lost on restart; saves on disk are not.
+
 ## Saves
 
 Stories are **auto-saved** after each turn once a world exists. Files go to `saves/<story_id>.json` (configurable via `saves_dir` in config). Each file holds the full graph state: story aggregate, messages, phase, turn, and thread id.
@@ -125,7 +150,7 @@ uv sync
 uv run pytest
 ```
 
-Formatting and linting are handled by pre-commit (black, isort, autoflake, flake8):
+Formatting, linting, and tests are handled by pre-commit (black, isort, autoflake, flake8, pytest):
 
 ```bash
 uv run pre-commit run --all-files
@@ -139,4 +164,5 @@ CI runs both on every push and pull request.
 - Character Catalogue and Worlds Catalogue to review, update, and reuse
 - Rewrite a previous message and continue the dialogue from there
 - Character portrait generation from a description
-- Gradio interface alongside the CLI and Streamlit UI
+- FastAPI
+- Vite + TypeScript frontend alongside the CLI and Streamlit UI

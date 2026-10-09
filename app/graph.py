@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Literal, Optional
+from typing import AsyncIterator, Literal, Optional
 
 import dotenv
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -12,7 +12,7 @@ from app import persistence
 from app.agents.character_agent import CharacterAgent
 from app.agents.world_gen import WorldGenerator
 from app.config import AppConfig, load_app_config
-from app.state.schemas import Story, StoryEvent, StorytellerState
+from app.state.schemas import Story, StoryEvent, StorytellerState, coerce_story
 from app.utils import (
     STRUCTURED_OUTPUT_ERROR,
     EventResponse,
@@ -326,7 +326,25 @@ class Storyteller:
         except Exception as e:
             logger.error(f"Auto-save failed: {e}")
 
-    async def tell(self, query: str, user_id: str, thread_id: str = None) -> str:
+    @staticmethod
+    def _reply_text(values: dict, interrupts) -> str:
+        """User-facing text for a finished turn: the interrupt prompt if paused, else last AI reply."""
+        if interrupts:
+            if isinstance(interrupts, (list, tuple)):
+                first = interrupts[0]
+                val = first.value if hasattr(first, "value") else first
+                if isinstance(val, dict):
+                    text = (val.get("draft") or val.get("hint") or "") or ""
+                    text = strip_thinking(text.strip()) if text.strip() else str(val)
+                    return text if text.strip() else str(val)
+                return str(val) if val is not None else ""
+            return str(interrupts)
+        return visible_response(values.get("messages", []))
+
+    async def tell_stream(
+        self, query: str, user_id: str, thread_id: str = None
+    ) -> AsyncIterator[dict]:
+        """Run one turn, yielding {"type": "node"} per graph step, then a final "message" or "error"."""
         # Check checkpoint for pending interrupts — avoids stale in-memory flag sending
         # normal story turns as Command(resume) into the object generator subgraph.
         effective_thread = thread_id or user_id
@@ -335,26 +353,63 @@ class Storyteller:
             snap = await self.graph.aget_state(config)
             if snap.interrupts:
                 logger.info(f"Sending command: {query}")
-                result = await self.arun(Command(resume=query), user_id, thread_id)
+                input_data = Command(resume=query)
             else:
-                result = await self.arun(query, user_id, thread_id)
-            await self._auto_save(result, user_id, effective_thread)
-            interrupts = result.get("__interrupt__")
-            self.waiting_for_feedback = bool(interrupts)
-            if interrupts:
-                if isinstance(interrupts, list) and interrupts:
-                    first = interrupts[0]
-                    val = first.value if hasattr(first, "value") else first
-                    if isinstance(val, dict):
-                        text = (val.get("draft") or val.get("hint") or "") or ""
-                        text = strip_thinking(text.strip()) if text.strip() else str(val)
-                        return text if text.strip() else str(val)
-                    return str(val) if val is not None else ""
-                return str(interrupts)
-            return visible_response(result.get("messages", []))
+                input_data = {"messages": [HumanMessage(content=query)], "user_id": user_id}
+            async for _namespace, update in self.graph.astream(
+                input_data, config, stream_mode="updates", subgraphs=True
+            ):
+                for node in update:
+                    if node != "__interrupt__":
+                        yield {"type": "node", "node": node}
+            snap = await self.graph.aget_state(config)
+            await self._auto_save(snap.values, user_id, effective_thread)
+            self.waiting_for_feedback = bool(snap.interrupts)
+            yield {
+                "type": "message",
+                "text": self._reply_text(snap.values, snap.interrupts),
+                "awaiting_feedback": bool(snap.interrupts),
+            }
         except Exception as e:
             logger.error(f"tell() failed: {e}")
-            return STRUCTURED_OUTPUT_ERROR
+            yield {"type": "error", "text": STRUCTURED_OUTPUT_ERROR}
+
+    async def tell(self, query: str, user_id: str, thread_id: str = None) -> str:
+        text = STRUCTURED_OUTPUT_ERROR
+        async for event in self.tell_stream(query, user_id, thread_id):
+            if event["type"] in ("message", "error"):
+                text = event["text"]
+        return text
+
+    async def get_state(self, user_id: str, thread_id: str = None) -> Optional[dict]:
+        """Snapshot of a thread for display; None if the thread has never run."""
+        config = {"configurable": {"user_id": user_id, "thread_id": thread_id or user_id}}
+        snap = await self.graph.aget_state(config)
+        values = snap.values or {}
+        if not values:
+            return None
+        history: list[dict] = []
+        for m in values.get("messages", []):
+            if isinstance(m, HumanMessage):
+                role = "user"
+            elif isinstance(m, AIMessage):
+                role = "assistant"
+            else:
+                continue
+            text = strip_thinking(message_text(m))
+            if text:
+                history.append({"role": role, "content": text})
+        story = coerce_story(values.get("story"))
+        return {
+            "phase": values.get("phase", "world"),
+            "turn": values.get("turn", 0),
+            "story": story.model_dump(mode="json") if story else None,
+            "awaiting_feedback": bool(snap.interrupts),
+            "pending_prompt": (
+                self._reply_text(values, snap.interrupts) if snap.interrupts else None
+            ),
+            "messages": history,
+        }
 
     async def load(self, save_data: dict, user_id: str, thread_id: str = None) -> None:
         """Restore a saved session into this Storyteller, replacing in-memory state."""
@@ -364,9 +419,9 @@ class Storyteller:
         phase = save_data.get("phase", "world")
         turn = save_data.get("turn", 0)
 
-        # Fresh checkpointer so no old state bleeds in.
-        self.checkpointer = MemorySaver()
-        self.graph = self.build_graph()
+        # Reset only this thread so no old state bleeds in; other threads stay intact.
+        if self.checkpointer is not None:
+            await self.checkpointer.adelete_thread(effective_thread)
 
         config = {"configurable": {"user_id": user_id, "thread_id": effective_thread}}
         await self.graph.aupdate_state(
