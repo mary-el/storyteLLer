@@ -5,7 +5,7 @@ from langchain_openai import ChatOpenAI
 from trustcall import create_extractor
 
 from app.config.schema import AppConfig
-from app.state.schemas import Character, CharacterObject, StorytellerState
+from app.state.schemas import Character, CharacterObject, StorytellerState, apply_locks
 from app.utils import logger, message_text, trim_history
 
 
@@ -98,6 +98,7 @@ class CharacterAgent:
 
             target = next((c for c in characters if c.object_id == json_doc_id), None)
             if json_doc_id and target is not None:
+                character = apply_locks(target.character, character, target.locked_fields)
                 obj = target.model_copy(update={"character": character})
                 characters = [obj if c.object_id == json_doc_id else c for c in characters]
                 action = "patched"

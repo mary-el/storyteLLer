@@ -1,5 +1,5 @@
 import uuid
-from typing import Annotated, Any, Literal, NotRequired, Optional
+from typing import Annotated, Any, Literal, NotRequired, Optional, TypeVar
 
 from langgraph.graph import MessagesState
 from pydantic import BaseModel, Field
@@ -37,6 +37,7 @@ class World(BaseModel):
 
 class CharacterObject(BaseObject):
     character: Character = Field(default_factory=Character)
+    locked_fields: list[str] = Field(default_factory=list)
 
 
 class WorldObject(BaseObject):
@@ -59,9 +60,19 @@ class Story(BaseModel):
     story_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     title: str = Field("Untitled")
     world: Optional[World] = None
+    world_locked_fields: list[str] = Field(default_factory=list)
     characters: list[CharacterObject] = Field(default_factory=list)
     summary: str = Field("None")
     events: list[StoryEvent] = Field(default_factory=list)
+
+
+ModelT = TypeVar("ModelT", bound=BaseModel)
+
+
+def apply_locks(old: ModelT, new: ModelT, locked: list[str]) -> ModelT:
+    """Return `new` with every locked field restored from `old`."""
+    kept = {f: getattr(old, f) for f in locked if f in type(new).model_fields}
+    return new.model_copy(update=kept) if kept else new
 
 
 def coerce_story(raw: Any) -> Optional[Story]:
