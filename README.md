@@ -14,7 +14,7 @@ Lightweight LangGraph-based storytelling assistant: build a **world**, then run 
 - **Human-in-the-loop world generation** — world creation runs as a reusable subgraph (`ObjectGenerator`) that iterates on user feedback and extracts a structured Pydantic object via [trustcall](https://github.com/hinthornw/trustcall) JSON-patching.
 - **On-demand character agent** — characters are created and patched in the background (trustcall extraction, no interactive wizard) whenever the narrator mentions a new or changed character; the model itself resolves which character each mention refers to, using the full character list.
 - **Rolling story memory** — a `Story` aggregate in graph state (world, characters, rolling summary, events) that the narrator sees each turn and that is saved to disk.
-- **Dual interfaces** — an interactive CLI and a Streamlit chat UI, both with auto-save/load persistence.
+- **Dual interfaces** — an interactive CLI and a Streamlit app (chat plus a world/character editor), both with auto-save/load persistence.
 - **Provider-agnostic LLM setup** — works with any OpenAI-compatible endpoint (Groq, OpenAI, local servers) via a single YAML config.
 
 ## Setup
@@ -58,12 +58,17 @@ Type `/load` to pick a saved world and resume. Type `exit`, `quit`, or `done` to
 streamlit run app/ui.py
 ```
 
-The sidebar shows phase, world, characters, rolling summary, and events. Actions:
+Two pages, sharing the current story:
+
+- **Chat** — play the story. The sidebar shows phase, world, characters, rolling summary, and events.
+- **World & Characters** — edit the current story's world and each character. Lock a field to keep the narrator from overwriting it; you can still change it here. Add and delete are placeholders for later.
+
+Chat actions:
 
 - **New Story** — start a fresh session on a new thread (old saves stay on disk).
 - **Load a world** — resume a saved story; chat history is restored from the save file.
 
-World creation starts automatically on first load (same bootstrap as the CLI).
+World creation starts automatically on first load (same bootstrap as the CLI). Saving an edit on **World & Characters** updates live graph state and the save file, so the next turn uses the change.
 
 **HTTP API**
 
@@ -92,7 +97,7 @@ Threads live in memory and are lost on restart; saves on disk are not.
 
 ## Saves
 
-Stories are **auto-saved** after each turn once a world exists. Files go to `saves/<story_id>.json` (configurable via `saves_dir` in config). Each file holds the full graph state: story aggregate, messages, phase, turn, and thread id.
+Stories are **auto-saved** after each turn once a world exists, and after a manual edit on **World & Characters**. Files go to `saves/<story_id>.json` (configurable via `saves_dir` in config). Each file holds the full graph state: story aggregate (including field locks), messages, phase, turn, and thread id.
 
 On load, checkpoint state is rebuilt from the saved `Story`.
 
@@ -110,7 +115,7 @@ On load, checkpoint state is rebuilt from the saved `Story`.
 
 The `Story` aggregate on graph state holds `world`, `characters`, `summary`, and `events`. After a turn flagged with `add_event`, `archive` refreshes `Story.summary` and appends a `StoryEvent`. The narrator sees the world, the character list, the rolling summary, and recent events in its prompt each turn. The same aggregate is what gets written to the save file.
 
-During story play, `character_agent` handles each of the narrator's plain-language commands with its own trustcall call (inserts enabled) — passing every existing character (tagged with its own id) alongside it — so the model decides, per command, whether to patch an existing character or create a new one. Processing sequentially also means a later command in the same turn can see a character a prior command in that turn just created.
+During story play, `character_agent` handles each of the narrator's plain-language commands with its own trustcall call (inserts enabled) — passing every existing character (tagged with its own id) alongside it — so the model decides, per command, whether to patch an existing character or create a new one. Processing sequentially also means a later command in the same turn can see a character a prior command in that turn just created. Locked fields on a patched character are restored from the previous value, so the narrator cannot overwrite them.
 
 ## Top-level graph (`StorytellerState`)
 
@@ -161,8 +166,7 @@ CI runs both on every push and pull request.
 ## Future ideas
 
 - Long-term memory via the MCP memory server (`@modelcontextprotocol/server-memory`)
-- Character Catalogue and Worlds Catalogue to review, update, and reuse
+- Share or export worlds and characters across stories
 - Rewrite a previous message and continue the dialogue from there
 - Character portrait generation from a description
-- FastAPI
 - Vite + TypeScript frontend alongside the CLI and Streamlit UI
