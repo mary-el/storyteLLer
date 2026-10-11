@@ -11,7 +11,7 @@ import dotenv
 import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage
 
-from app import persistence
+from app import persistence, ui_editor
 from app.graph import Storyteller
 from app.state.schemas import coerce_story
 from app.utils import STRUCTURED_OUTPUT_ERROR, logger, split_thinking
@@ -178,10 +178,7 @@ def _render_sidebar(story) -> None:
 # ── main ──────────────────────────────────────────────────────────────────────
 
 
-def main() -> None:
-    st.set_page_config(page_title="storyteLLer", page_icon="📖", layout="wide")
-    _init_session()
-
+def chat_page() -> None:
     # Show fixed greeting on a fresh session (no LLM call needed).
     if not st.session_state.bootstrapped:
         greeting = asyncio.run(st.session_state.storyteller.init(_USER_ID, _thread_id()))
@@ -225,6 +222,16 @@ def main() -> None:
             {"role": "assistant", "content": text, "thinking": thinking}
         )
         st.rerun()
+
+
+def main() -> None:
+    st.set_page_config(page_title="storyteLLer", page_icon="📖", layout="wide")
+    _init_session()
+    pages = [
+        st.Page(chat_page, title="Chat", icon="💬", default=True),
+        st.Page(ui_editor.render, title="World & Characters", icon="🌍", url_path="editor"),
+    ]
+    st.navigation(pages).run()
 
 
 if __name__ == "__main__":
