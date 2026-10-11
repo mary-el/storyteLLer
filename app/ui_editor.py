@@ -119,5 +119,6 @@ def render() -> None:
     st.divider()
     _render_characters(story, disabled)
 
+
 if __name__ == "__main__":
     render()

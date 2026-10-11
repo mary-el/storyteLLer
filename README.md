@@ -76,17 +76,21 @@ World creation starts automatically on first load (same bootstrap as the CLI). S
 uv run uvicorn app.api:app --reload
 ```
 
-A FastAPI wrapper around `Storyteller.init` / `tell` / `load`. Interactive docs are at `http://localhost:8000/docs`. An optional `X-User-Id` header selects the user (default `1`). CORS origins come from `STORYTELLER_CORS_ORIGINS` (comma-separated, default `http://localhost:5173`).
+A FastAPI wrapper around `Storyteller.init` / `tell` / `load` / `update_story`. Interactive docs are at `http://localhost:8000/docs`. An optional `X-User-Id` header selects the user (default `1`). CORS origins come from `STORYTELLER_CORS_ORIGINS` (comma-separated, default `http://localhost:5173`).
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/threads` | Start a thread; returns `thread_id` and the greeting |
 | `POST` | `/threads/{thread_id}/turns` | Send `{"message": "..."}`; streams the turn over SSE |
 | `GET` | `/threads/{thread_id}/state` | Phase, turn, story, pending prompt, chat history |
+| `PATCH` | `/threads/{thread_id}/world` | Replace the world and its locked fields |
+| `PATCH` | `/threads/{thread_id}/characters/{object_id}` | Replace one character and its locked fields |
 | `GET` | `/saves` | List saved stories, newest first |
 | `POST` | `/saves/{story_id}/resume` | Load a save into a new thread |
 
 A turn streams `node` events as graph steps finish, then one `message` event (`text`, `awaiting_feedback`) or an `error`, then `done`. Sending a second turn to a thread while one is running returns `409`.
+
+World and character patches replace the whole object (omitted fields use schema defaults) and write the save file. They return `409` while a turn is running or the world wizard is waiting for feedback, `404` when the thread has no world yet (or the character id is unknown), and `422` when a locked field name is not on that model.
 
 ```bash
 curl -N -X POST localhost:8000/threads/<thread_id>/turns \

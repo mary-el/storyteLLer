@@ -230,9 +230,7 @@ def chat_page() -> None:
 def main() -> None:
     st.set_page_config(page_title="storyteLLer", page_icon="📖", layout="wide")
     _init_session()
-    editor_page = st.Page(
-        "ui_editor.py", title="World & Characters", icon="🌍", url_path="editor"
-    )
+    editor_page = st.Page("ui_editor.py", title="World & Characters", icon="🌍", url_path="editor")
     st.session_state.editor_page = editor_page
     st.navigation(
         [

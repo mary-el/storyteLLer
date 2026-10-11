@@ -1,4 +1,4 @@
-"""HTTP API for storyteLLer: threads, SSE-streamed turns, story state, and saves.
+"""HTTP API for storyteLLer: threads, SSE-streamed turns, story edits, and saves.
 
 Run with: uv run uvicorn app.api:app --reload
 """
@@ -16,10 +16,11 @@ import dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app import persistence
 from app.graph import Storyteller
+from app.state.schemas import Character, World, coerce_story
 
 dotenv.load_dotenv()
 
@@ -62,6 +63,37 @@ class ResumedThread(BaseModel):
     state: ThreadState
 
 
+def _known_lock_fields(names: list[str], model: type[BaseModel]) -> list[str]:
+    unknown = [name for name in names if name not in model.model_fields]
+    if unknown:
+        raise ValueError(f"Unknown lock fields: {', '.join(unknown)}")
+    return names
+
+
+class WorldUpdate(BaseModel):
+    """Full world replacement, matching the editor's Save world action."""
+
+    world: World
+    world_locked_fields: list[str] = []
+
+    @field_validator("world_locked_fields")
+    @classmethod
+    def locks_are_world_fields(cls, names: list[str]) -> list[str]:
+        return _known_lock_fields(names, World)
+
+
+class CharacterUpdate(BaseModel):
+    """Full character replacement, matching the editor's Save character action."""
+
+    character: Character
+    locked_fields: list[str] = []
+
+    @field_validator("locked_fields")
+    @classmethod
+    def locks_are_character_fields(cls, names: list[str]) -> list[str]:
+        return _known_lock_fields(names, Character)
+
+
 def get_storyteller(request: Request) -> Storyteller:
     return request.app.state.storyteller
 
@@ -101,6 +133,28 @@ def create_app(storyteller: Optional[Storyteller] = None) -> FastAPI:
         if state is None:
             raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' not found")
         return state
+
+    @asynccontextmanager
+    async def editable_story(st: Storyteller, user_id: str, thread_id: str):
+        """Hold the turn lock and yield the current story when manual edits are allowed."""
+        await require_state(st, user_id, thread_id)
+        lock = thread_lock(thread_id)
+        if lock.locked():
+            raise HTTPException(status_code=409, detail="A turn is already in progress")
+        async with lock:
+            state = await require_state(st, user_id, thread_id)
+            if state["awaiting_feedback"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Finish the current step in Chat before editing.",
+                )
+            story = coerce_story(state["story"])
+            if story is None or story.world is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No world yet. Create one in Chat first.",
+                )
+            yield story
 
     @app.get("/", include_in_schema=False)
     async def root() -> RedirectResponse:
@@ -154,6 +208,46 @@ def create_app(storyteller: Optional[Storyteller] = None) -> FastAPI:
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    @app.patch("/threads/{thread_id}/world", response_model=ThreadState)
+    async def update_world(
+        thread_id: str,
+        body: WorldUpdate,
+        st: StorytellerDep,
+        x_user_id: UserIdHeader = "1",
+    ) -> dict:
+        async with editable_story(st, x_user_id, thread_id) as story:
+            updated = story.model_copy(
+                update={"world": body.world, "world_locked_fields": body.world_locked_fields}
+            )
+            await st.update_story(updated, x_user_id, thread_id)
+            return await require_state(st, x_user_id, thread_id)
+
+    @app.patch("/threads/{thread_id}/characters/{object_id}", response_model=ThreadState)
+    async def update_character(
+        thread_id: str,
+        object_id: str,
+        body: CharacterUpdate,
+        st: StorytellerDep,
+        x_user_id: UserIdHeader = "1",
+    ) -> dict:
+        async with editable_story(st, x_user_id, thread_id) as story:
+            if not any(character.object_id == object_id for character in story.characters):
+                raise HTTPException(status_code=404, detail=f"Character '{object_id}' not found")
+            characters = [
+                (
+                    character.model_copy(
+                        update={"character": body.character, "locked_fields": body.locked_fields}
+                    )
+                    if character.object_id == object_id
+                    else character
+                )
+                for character in story.characters
+            ]
+            await st.update_story(
+                story.model_copy(update={"characters": characters}), x_user_id, thread_id
+            )
+            return await require_state(st, x_user_id, thread_id)
 
     @app.get("/saves", response_model=list[SaveInfo])
     async def list_saves(st: StorytellerDep) -> list[dict]:
