@@ -435,3 +435,12 @@ class Storyteller:
             },
         )
         logger.info(f"Loaded save '{story.title}' (phase={phase}, turn={turn})")
+
+    async def update_story(self, story: Story, user_id: str, thread_id: str = None) -> None:
+        """Replace the thread's story with a manually edited one and persist it."""
+        effective_thread = thread_id or user_id
+        config = {"configurable": {"user_id": user_id, "thread_id": effective_thread}}
+        # As finalize_turn, so the next tell() starts a fresh turn from START.
+        await self.graph.aupdate_state(config, {"story": story}, as_node="finalize_turn")
+        snap = await self.graph.aget_state(config)
+        await self._auto_save(snap.values, user_id, effective_thread)
