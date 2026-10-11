@@ -11,7 +11,7 @@ import dotenv
 import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage
 
-from app import persistence, ui_editor
+from app import persistence
 from app.graph import Storyteller
 from app.state.schemas import coerce_story
 from app.utils import STRUCTURED_OUTPUT_ERROR, logger, split_thinking
@@ -33,6 +33,7 @@ def _init_session() -> None:
         st.session_state.bootstrapped = False
     if "thread_id" not in st.session_state:
         st.session_state.thread_id = str(uuid.uuid4())
+    st.session_state.user_id = _USER_ID
 
 
 def _thread_id() -> str:
@@ -160,6 +161,8 @@ def _render_sidebar(story) -> None:
         else:
             st.caption("No characters yet.")
 
+        st.page_link(st.session_state.editor_page, label="Edit world & characters")
+
         st.divider()
 
         if story and story.summary:
@@ -227,11 +230,16 @@ def chat_page() -> None:
 def main() -> None:
     st.set_page_config(page_title="storyteLLer", page_icon="📖", layout="wide")
     _init_session()
-    pages = [
-        st.Page(chat_page, title="Chat", icon="💬", default=True),
-        st.Page(ui_editor.render, title="World & Characters", icon="🌍", url_path="editor"),
-    ]
-    st.navigation(pages).run()
+    editor_page = st.Page(
+        "ui_editor.py", title="World & Characters", icon="🌍", url_path="editor"
+    )
+    st.session_state.editor_page = editor_page
+    st.navigation(
+        [
+            st.Page(chat_page, title="Chat", icon="💬", default=True),
+            editor_page,
+        ]
+    ).run()
 
 
 if __name__ == "__main__":
