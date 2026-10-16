@@ -5,7 +5,7 @@ from langchain_openai import ChatOpenAI
 from trustcall import create_extractor
 
 from app.config.schema import AppConfig
-from app.state.schemas import Character, CharacterObject, StorytellerState, apply_locks
+from app.state.schemas import Character, StorytellerState, apply_locks
 from app.utils import logger, message_text, trim_history
 
 
@@ -78,12 +78,14 @@ class CharacterAgent:
         if not story or not commands:
             return {}
 
-        characters = list(story.characters)
+        current = story
         context_messages = self._trimmed_context(state)
         changed = False
 
         for command in commands:
-            existing = [(c.object_id, "Character", c.character.model_dump()) for c in characters]
+            existing = [
+                (c.object_id, "Character", c.character.model_dump()) for c in current.characters
+            ]
             messages = context_messages + [
                 SystemMessage(content=self.instructions.format(instruction=command))
             ]
@@ -96,19 +98,19 @@ class CharacterAgent:
                 logger.error(f"CharacterAgent: no character resolved for {command!r}")
                 continue
 
-            target = next((c for c in characters if c.object_id == json_doc_id), None)
+            target = next((c for c in current.characters if c.object_id == json_doc_id), None)
             if json_doc_id and target is not None:
                 character = apply_locks(target.character, character, target.locked_fields)
-                obj = target.model_copy(update={"character": character})
-                characters = [obj if c.object_id == json_doc_id else c for c in characters]
+                current = current.update_character(json_doc_id, character, target.locked_fields)
+                object_id = json_doc_id
                 action = "patched"
             else:
-                obj = CharacterObject(character=character)
-                characters.append(obj)
+                current = current.add_character(character)
+                object_id = current.characters[-1].object_id
                 action = "created"
             changed = True
-            logger.debug(f"CharacterAgent: {action} {obj.object_id} ({character.name!r})")
+            logger.debug(f"CharacterAgent: {action} {object_id} ({character.name!r})")
 
         if not changed:
             return {}
-        return {"story": story.model_copy(update={"characters": characters})}
+        return {"story": current}

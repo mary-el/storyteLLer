@@ -232,21 +232,13 @@ def create_app(storyteller: Optional[Storyteller] = None) -> FastAPI:
         x_user_id: UserIdHeader = "1",
     ) -> dict:
         async with editable_story(st, x_user_id, thread_id) as story:
-            if not any(character.object_id == object_id for character in story.characters):
-                raise HTTPException(status_code=404, detail=f"Character '{object_id}' not found")
-            characters = [
-                (
-                    character.model_copy(
-                        update={"character": body.character, "locked_fields": body.locked_fields}
-                    )
-                    if character.object_id == object_id
-                    else character
-                )
-                for character in story.characters
-            ]
-            await st.update_story(
-                story.model_copy(update={"characters": characters}), x_user_id, thread_id
-            )
+            try:
+                updated = story.update_character(object_id, body.character, body.locked_fields)
+            except KeyError:
+                raise HTTPException(
+                    status_code=404, detail=f"Character '{object_id}' not found"
+                ) from None
+            await st.update_story(updated, x_user_id, thread_id)
             return await require_state(st, x_user_id, thread_id)
 
     @app.get("/saves", response_model=list[SaveInfo])

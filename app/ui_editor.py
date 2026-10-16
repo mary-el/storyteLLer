@@ -91,13 +91,7 @@ def _render_characters(story: Story, disabled: bool) -> None:
                     co.character, co.locked_fields, co.object_id, disabled
                 )
                 if st.form_submit_button("Save character", disabled=disabled, type="primary"):
-                    updated = co.model_copy(
-                        update={"character": Character(**values), "locked_fields": locked}
-                    )
-                    characters = [
-                        updated if c.object_id == co.object_id else c for c in story.characters
-                    ]
-                    _save(story.model_copy(update={"characters": characters}))
+                    _save(story.update_character(co.object_id, Character(**values), locked))
                     st.toast(f"{values['name']} saved")
                     st.rerun()
             st.button("Delete", key=f"delete_{co.object_id}", disabled=True, help="Coming soon")

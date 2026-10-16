@@ -65,6 +65,53 @@ class Story(BaseModel):
     summary: str = Field("None")
     events: list[StoryEvent] = Field(default_factory=list)
 
+    def add_character(
+        self,
+        character: Optional[Character] = None,
+        locked_fields: Optional[list[str]] = None,
+    ) -> "Story":
+        """Return a copy with a new character appended. A new id is always assigned."""
+        added = CharacterObject(
+            character=character if character is not None else Character(),
+            locked_fields=list(locked_fields or []),
+        )
+        return self.model_copy(update={"characters": [*self.characters, added]})
+
+    def update_character(
+        self,
+        object_id: str,
+        character: Character,
+        locked_fields: Optional[list[str]] = None,
+    ) -> "Story":
+        """Return a copy with that character and its locks replaced. Order is kept."""
+        if not any(existing.object_id == object_id for existing in self.characters):
+            raise KeyError(object_id)
+        replacement = CharacterObject(
+            object_id=object_id,
+            character=character,
+            locked_fields=list(locked_fields or []),
+        )
+        return self.model_copy(
+            update={
+                "characters": [
+                    replacement if existing.object_id == object_id else existing
+                    for existing in self.characters
+                ]
+            }
+        )
+
+    def remove_character(self, object_id: str) -> "Story":
+        """Return a copy without the character with this id. Order of the rest is kept."""
+        if not any(character.object_id == object_id for character in self.characters):
+            raise KeyError(object_id)
+        return self.model_copy(
+            update={
+                "characters": [
+                    character for character in self.characters if character.object_id != object_id
+                ]
+            }
+        )
+
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
