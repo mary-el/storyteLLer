@@ -7,7 +7,7 @@ import asyncio
 import streamlit as st
 from pydantic import BaseModel
 
-from app.state.schemas import Character, Story, World, coerce_story
+from app.state.schemas import Character, CharacterObject, Story, World, coerce_story
 
 
 def _config() -> dict:
@@ -73,15 +73,54 @@ def _render_world(story: Story, disabled: bool) -> None:
             st.rerun()
 
 
+_PENDING_DELETE = "pending_character_delete"
+
+
+def _delete_character(story: Story, co: CharacterObject, disabled: bool) -> None:
+    """Ask before removing a character. The first click only opens the prompt."""
+    if st.session_state.get(_PENDING_DELETE) == co.object_id:
+        st.caption(f"Delete {co.character.name}?")
+        confirm_col, cancel_col = st.columns(2)
+        with confirm_col:
+            if st.button(
+                "Confirm delete",
+                key=f"confirm_delete_{co.object_id}",
+                disabled=disabled,
+                type="primary",
+                use_container_width=True,
+            ):
+                st.session_state.pop(_PENDING_DELETE, None)
+                _save(story.remove_character(co.object_id))
+                st.toast(f"{co.character.name} deleted")
+                st.rerun()
+        with cancel_col:
+            if st.button(
+                "Cancel",
+                key=f"cancel_delete_{co.object_id}",
+                disabled=disabled,
+                use_container_width=True,
+            ):
+                st.session_state.pop(_PENDING_DELETE, None)
+                st.rerun()
+        return
+
+    if st.button("Delete", key=f"delete_{co.object_id}", disabled=disabled):
+        st.session_state[_PENDING_DELETE] = co.object_id
+        st.rerun()
+
+
 def _render_characters(story: Story, disabled: bool) -> None:
     head_col, add_col = st.columns([6, 1], vertical_alignment="bottom")
     with head_col:
         st.subheader(f"Characters ({len(story.characters)})")
     with add_col:
-        st.button("Add character", disabled=True, help="Coming soon", use_container_width=True)
+        if st.button("Add character", disabled=disabled, use_container_width=True):
+            _save(story.add_character())
+            st.toast("Character added")
+            st.rerun()
 
     if not story.characters:
-        st.caption("No characters yet. They appear as the narrator introduces them.")
+        st.caption("No characters yet.")
         return
 
     for co in story.characters:
@@ -94,7 +133,7 @@ def _render_characters(story: Story, disabled: bool) -> None:
                     _save(story.update_character(co.object_id, Character(**values), locked))
                     st.toast(f"{values['name']} saved")
                     st.rerun()
-            st.button("Delete", key=f"delete_{co.object_id}", disabled=True, help="Coming soon")
+            _delete_character(story, co, disabled)
 
 
 def render() -> None:

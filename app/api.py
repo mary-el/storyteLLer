@@ -94,6 +94,18 @@ class CharacterUpdate(BaseModel):
         return _known_lock_fields(names, Character)
 
 
+class CharacterCreate(BaseModel):
+    """A new character appended to the cast. The server assigns object_id."""
+
+    character: Character = Field(default_factory=Character)
+    locked_fields: list[str] = []
+
+    @field_validator("locked_fields")
+    @classmethod
+    def locks_are_character_fields(cls, names: list[str]) -> list[str]:
+        return _known_lock_fields(names, Character)
+
+
 def get_storyteller(request: Request) -> Storyteller:
     return request.app.state.storyteller
 
@@ -234,6 +246,35 @@ def create_app(storyteller: Optional[Storyteller] = None) -> FastAPI:
         async with editable_story(st, x_user_id, thread_id) as story:
             try:
                 updated = story.update_character(object_id, body.character, body.locked_fields)
+            except KeyError:
+                raise HTTPException(
+                    status_code=404, detail=f"Character '{object_id}' not found"
+                ) from None
+            await st.update_story(updated, x_user_id, thread_id)
+            return await require_state(st, x_user_id, thread_id)
+
+    @app.post("/threads/{thread_id}/characters", response_model=ThreadState, status_code=201)
+    async def create_character(
+        thread_id: str,
+        body: CharacterCreate,
+        st: StorytellerDep,
+        x_user_id: UserIdHeader = "1",
+    ) -> dict:
+        async with editable_story(st, x_user_id, thread_id) as story:
+            updated = story.add_character(body.character, body.locked_fields)
+            await st.update_story(updated, x_user_id, thread_id)
+            return await require_state(st, x_user_id, thread_id)
+
+    @app.delete("/threads/{thread_id}/characters/{object_id}", response_model=ThreadState)
+    async def delete_character(
+        thread_id: str,
+        object_id: str,
+        st: StorytellerDep,
+        x_user_id: UserIdHeader = "1",
+    ) -> dict:
+        async with editable_story(st, x_user_id, thread_id) as story:
+            try:
+                updated = story.remove_character(object_id)
             except KeyError:
                 raise HTTPException(
                     status_code=404, detail=f"Character '{object_id}' not found"

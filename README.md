@@ -61,7 +61,7 @@ streamlit run app/ui.py
 Two pages, sharing the current story:
 
 - **Chat** — play the story. The sidebar shows phase, world, characters, rolling summary, and events.
-- **World & Characters** — edit the current story's world and each character. Lock a field to keep the narrator from overwriting it; you can still change it here. Add and delete are placeholders for later.
+- **World & Characters** — edit the current story's world and each character. Lock a field to keep the narrator from overwriting it; you can still change it here. Add a character or delete one from the same page.
 
 Chat actions:
 
@@ -84,13 +84,15 @@ A FastAPI wrapper around `Storyteller.init` / `tell` / `load` / `update_story`. 
 | `POST` | `/threads/{thread_id}/turns` | Send `{"message": "..."}`; streams the turn over SSE |
 | `GET` | `/threads/{thread_id}/state` | Phase, turn, story, pending prompt, chat history |
 | `PATCH` | `/threads/{thread_id}/world` | Replace the world and its locked fields |
+| `POST` | `/threads/{thread_id}/characters` | Append a character; the server assigns `object_id` |
 | `PATCH` | `/threads/{thread_id}/characters/{object_id}` | Replace one character and its locked fields |
+| `DELETE` | `/threads/{thread_id}/characters/{object_id}` | Remove one character |
 | `GET` | `/saves` | List saved stories, newest first |
 | `POST` | `/saves/{story_id}/resume` | Load a save into a new thread |
 
 A turn streams `node` events as graph steps finish, then one `message` event (`text`, `awaiting_feedback`) or an `error`, then `done`. Sending a second turn to a thread while one is running returns `409`.
 
-World and character patches replace the whole object (omitted fields use schema defaults) and write the save file. They return `409` while a turn is running or the world wizard is waiting for feedback, `404` when the thread has no world yet (or the character id is unknown), and `422` when a locked field name is not on that model.
+World and character patches replace the whole object (omitted fields use schema defaults) and write the save file. Creating a character appends one; an empty body uses schema defaults and a server-assigned id. Deleting a character removes that id and keeps the rest of the cast in order. These edits return `409` while a turn is running or the world wizard is waiting for feedback, `404` when the thread has no world yet (or the character id is unknown), and `422` when a locked field name is not on that model.
 
 ```bash
 curl -N -X POST localhost:8000/threads/<thread_id>/turns \
