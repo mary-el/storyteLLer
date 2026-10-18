@@ -12,7 +12,7 @@ from app import persistence
 from app.agents.character_agent import CharacterAgent
 from app.agents.world_gen import WorldGenerator
 from app.config import AppConfig, load_app_config
-from app.state.schemas import Story, StoryEvent, StorytellerState, coerce_story
+from app.state.schemas import Story, StoryEvent, StorytellerState, TurnSummary, coerce_story
 from app.utils import (
     STRUCTURED_OUTPUT_ERROR,
     EventResponse,
@@ -213,11 +213,31 @@ class Storyteller:
         if not story:
             return updates
 
+        user_message_id = ""
+        for message in reversed(state.get("messages") or []):
+            if isinstance(message, HumanMessage):
+                user_message_id = message.id or ""
+                break
+
         patch: dict = {}
         if turn_summary:
-            patch["summary"] = turn_summary
-            patch["title"] = turn_title or story.title
+            summary_text = turn_summary
+            title_text = turn_title or story.title
+            patch["summary"] = summary_text
+            patch["title"] = title_text
             logger.debug("finalize_turn_node: merged _turn_summary into story.summary")
+        else:
+            summary_text = story.summary
+            title_text = story.title
+        patch["turn_summaries"] = [
+            *story.turn_summaries,
+            TurnSummary(
+                turn=turn,
+                summary=summary_text,
+                title=title_text,
+                user_message_id=user_message_id,
+            ),
+        ]
         if new_event:
             stamped = StoryEvent(turn=turn, event=new_event.event)
             patch["events"] = [*story.events, stamped]

@@ -54,6 +54,15 @@ class StoryEvent(BaseModel):
     event: str
 
 
+class TurnSummary(BaseModel):
+    """The rolling summary as it stood at the end of one story turn."""
+
+    turn: int
+    summary: str
+    title: str
+    user_message_id: str = ""
+
+
 class Story(BaseModel):
     """One world, multiple characters, running summary."""
 
@@ -64,6 +73,7 @@ class Story(BaseModel):
     characters: list[CharacterObject] = Field(default_factory=list)
     summary: str = Field("None")
     events: list[StoryEvent] = Field(default_factory=list)
+    turn_summaries: list[TurnSummary] = Field(default_factory=list)
 
     def add_character(
         self,
