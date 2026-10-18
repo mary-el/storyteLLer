@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import AsyncIterator, Literal, Optional
 
 import dotenv
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -26,6 +26,44 @@ from app.utils import (
 )
 
 dotenv.load_dotenv()
+
+
+def _rewound_story(story: Optional[Story], user_message_id: str) -> tuple[int, Optional[Story]]:
+    """Drop events and summaries from the chosen user message's turn onward.
+
+    World, characters, and lock fields stay. A message with no snapshot clears
+    every event and summary and restores the pre-story summary, title, and turn.
+    """
+    if story is None:
+        return 0, None
+
+    matches = [item for item in story.turn_summaries if item.user_message_id == user_message_id]
+    if matches:
+        cut_turn = min(item.turn for item in matches)
+        # One summary is stored per turn, numbered from 1.
+        kept = story.turn_summaries[: cut_turn - 1]
+        events = [event for event in story.events if event.turn < cut_turn]
+    else:
+        kept = []
+        events = []
+
+    if kept:
+        summary = kept[-1].summary
+        title = kept[-1].title
+        turn = kept[-1].turn
+    else:
+        summary = "None"
+        title = "Untitled"
+        turn = 0
+
+    return turn, story.model_copy(
+        update={
+            "summary": summary,
+            "title": title,
+            "events": events,
+            "turn_summaries": kept,
+        }
+    )
 
 
 class Storyteller:
@@ -464,3 +502,39 @@ class Storyteller:
         await self.graph.aupdate_state(config, {"story": story}, as_node="finalize_turn")
         snap = await self.graph.aget_state(config)
         await self._auto_save(snap.values, user_id, effective_thread)
+
+    async def rewind_to_user_message(
+        self, user_id: str, thread_id: str, user_message_id: str
+    ) -> None:
+        """Drop a user message and everything after it, then persist.
+
+        Raises KeyError when the id is missing or is not a user message.
+        """
+        effective_thread = thread_id or user_id
+        config = {"configurable": {"user_id": user_id, "thread_id": effective_thread}}
+        snap = await self.graph.aget_state(config)
+        messages = list((snap.values or {}).get("messages") or [])
+        cut = next(
+            (
+                index
+                for index, message in enumerate(messages)
+                if isinstance(message, HumanMessage) and message.id == user_message_id
+            ),
+            None,
+        )
+        if cut is None:
+            raise KeyError(user_message_id)
+
+        turn, story = _rewound_story(
+            coerce_story((snap.values or {}).get("story")), user_message_id
+        )
+        update: dict = {
+            "messages": [RemoveMessage(id=message.id) for message in messages[cut:] if message.id],
+            "turn": turn,
+        }
+        if story is not None:
+            update["story"] = story
+        # As finalize_turn, so the next tell() starts a fresh turn from START.
+        await self.graph.aupdate_state(config, update, as_node="finalize_turn")
+        saved = await self.graph.aget_state(config)
+        await self._auto_save(saved.values, user_id, effective_thread)
