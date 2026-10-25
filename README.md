@@ -13,7 +13,8 @@ Lightweight LangGraph-based storytelling assistant: build a **world**, then run 
 - **Multi-agent LangGraph architecture** — a top-level graph with a story narrator, character agent, and `story_update` archivist, driven by structured JSON routing decisions.
 - **Human-in-the-loop world generation** — world creation runs as a reusable subgraph (`ObjectGenerator`) that iterates on user feedback and extracts a structured Pydantic object via [trustcall](https://github.com/hinthornw/trustcall) JSON-patching.
 - **On-demand character agent** — characters are created and patched in the background (trustcall extraction, no interactive wizard) whenever the narrator mentions a new or changed character; the model itself resolves which character each mention refers to, using the full character list.
-- **Rolling story memory** — a `Story` aggregate in graph state (world, characters, rolling summary, events) that the narrator sees each turn and that is saved to disk.
+- **Rolling story memory** — a `Story` aggregate in graph state (world, characters, rolling summary, events, and one summary snapshot per story turn) that the narrator sees each turn and that is saved to disk.
+- **Rewrite a message** — edit an earlier user line and continue from there. That line and everything after it are dropped, including later events; the world and characters stay.
 - **Dual interfaces** — an interactive CLI and a Streamlit app (chat plus a world/character editor), both with auto-save/load persistence.
 - **Provider-agnostic LLM setup** — works with any OpenAI-compatible endpoint (Groq, OpenAI, local servers) via a single YAML config.
 
@@ -67,6 +68,7 @@ Chat actions:
 
 - **New Story** — start a fresh session on a new thread (old saves stay on disk).
 - **Load a world** — resume a saved story; chat history is restored from the save file.
+- **Rewrite** (✍) — copies that line into the composer. Sending asks you to confirm: this message and everything after it will be removed, including later events; the world and characters stay. Confirm rewinds to that line and narrates the edited text. Cancel restores the normal chat box.
 
 World creation starts automatically on first load (same bootstrap as the CLI). Saving an edit on **World & Characters** updates live graph state and the save file, so the next turn uses the change.
 
@@ -82,7 +84,8 @@ A FastAPI wrapper around `Storyteller.init` / `tell` / `load` / `update_story`. 
 | --- | --- | --- |
 | `POST` | `/threads` | Start a thread; returns `thread_id` and the greeting |
 | `POST` | `/threads/{thread_id}/turns` | Send `{"message": "..."}`; streams the turn over SSE |
-| `GET` | `/threads/{thread_id}/state` | Phase, turn, story, pending prompt, chat history |
+| `GET` | `/threads/{thread_id}/state` | Phase, turn, story, pending prompt, chat history (each message includes `id`) |
+| `POST` | `/threads/{thread_id}/rewind` | Drop a user message and everything after it; body `{"user_message_id": "..."}`; returns the truncated thread state and does not narrate |
 | `PATCH` | `/threads/{thread_id}/world` | Replace the world and its locked fields |
 | `POST` | `/threads/{thread_id}/characters` | Append a character; the server assigns `object_id` |
 | `PATCH` | `/threads/{thread_id}/characters/{object_id}` | Replace one character and its locked fields |
@@ -91,6 +94,8 @@ A FastAPI wrapper around `Storyteller.init` / `tell` / `load` / `update_story`. 
 | `POST` | `/saves/{story_id}/resume` | Load a save into a new thread |
 
 A turn streams `node` events as graph steps finish, then one `message` event (`text`, `awaiting_feedback`) or an `error`, then `done`. Sending a second turn to a thread while one is running returns `409`.
+
+Rewind uses the `id` from thread state. An unknown id, or an id that is not a user message, returns `404`. A rewind while a turn is running returns `409`. After rewind, send the edited text with the turns route.
 
 World and character patches replace the whole object (omitted fields use schema defaults) and write the save file. Creating a character appends one; an empty body uses schema defaults and a server-assigned id. Deleting a character removes that id and keeps the rest of the cast in order. These edits return `409` while a turn is running or the world wizard is waiting for feedback, `404` when the thread has no world yet (or the character id is unknown), and `422` when a locked field name is not on that model.
 
@@ -103,7 +108,7 @@ Threads live in memory and are lost on restart; saves on disk are not.
 
 ## Saves
 
-Stories are **auto-saved** after each turn once a world exists, and after a manual edit on **World & Characters**. Files go to `saves/<story_id>.json` (configurable via `saves_dir` in config). Each file holds the full graph state: story aggregate (including field locks), messages, phase, turn, and thread id.
+Stories are **auto-saved** after each turn once a world exists, after a manual edit on **World & Characters**, and after a rewind. Files go to `saves/<story_id>.json` (configurable via `saves_dir` in config). Each file holds the full graph state: story aggregate (including field locks and per-turn summary snapshots), messages, phase, turn, and thread id.
 
 On load, checkpoint state is rebuilt from the saved `Story`.
 
@@ -115,11 +120,13 @@ On load, checkpoint state is rebuilt from the saved `Story`.
    - **`add_event`** — a key event worth archiving; routes (in parallel) to `archive`.
    - Otherwise (no character changes, no event) — falls straight through to `finalize_turn`.
 
-`character_agent` and `archive` fan back into `finalize_turn`, which increments `turn` and merges in the summary/event.
+`character_agent` and `archive` fan back into `finalize_turn`, which increments `turn`, merges in the summary/event, and appends one summary snapshot for that turn.
 
 ## Memory
 
-The `Story` aggregate on graph state holds `world`, `characters`, `summary`, and `events`. After a turn flagged with `add_event`, `archive` refreshes `Story.summary` and appends a `StoryEvent`. The narrator sees the world, the character list, the rolling summary, and recent events in its prompt each turn. The same aggregate is what gets written to the save file.
+The `Story` aggregate on graph state holds `world`, `characters`, `summary`, `events`, and `turn_summaries`. After a turn flagged with `add_event`, `archive` refreshes `Story.summary` and appends a `StoryEvent`. Every story turn also stores a snapshot of the summary, title, and the user message that produced it. The narrator still reads the latest `summary`. The same aggregate is what gets written to the save file.
+
+Rewriting a user message drops that message and every graph message after it. If that line has a summary snapshot, events and snapshots from its turn onward are dropped and the summary rolls back to the previous snapshot. A story line from before snapshots were recorded is counted back from the current turn, so events from that turn onward still drop and the next reply continues there. Rewriting a world-building line clears the story events. The world, characters, and field locks stay either way.
 
 During story play, `character_agent` handles each of the narrator's plain-language commands with its own trustcall call (inserts enabled) — passing every existing character (tagged with its own id) alongside it — so the model decides, per command, whether to patch an existing character or create a new one. Processing sequentially also means a later command in the same turn can see a character a prior command in that turn just created. Locked fields on a patched character are restored from the previous value, so the narrator cannot overwrite them.
 
@@ -173,6 +180,5 @@ CI runs both on every push and pull request.
 
 - Long-term memory via the MCP memory server (`@modelcontextprotocol/server-memory`)
 - Share or export worlds and characters across stories
-- Rewrite a previous message and continue the dialogue from there
 - Character portrait generation from a description
 - Vite + TypeScript frontend alongside the CLI and Streamlit UI

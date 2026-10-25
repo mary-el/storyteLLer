@@ -28,35 +28,51 @@ from app.utils import (
 dotenv.load_dotenv()
 
 
-def _rewound_story(story: Optional[Story], user_message_id: str) -> tuple[int, Optional[Story]]:
-    """Drop events and summaries from the chosen user message's turn onward.
+def _story_message_turns(messages: list, turn: int) -> dict[str, int]:
+    """Map each story user-message id to the turn that line produced.
 
-    World, characters, and lock fields stay. A message with no snapshot clears
-    every event and summary and restores the pre-story summary, title, and turn.
+    The newest story line is ``turn``. Earlier story lines count backward.
+    Lines before the world was created are not story turns.
     """
-    if story is None:
-        return 0, None
+    world_at = next(
+        (
+            index
+            for index, message in enumerate(messages)
+            if isinstance(message, SystemMessage) and "OBJECT_CREATED" in message_text(message)
+        ),
+        None,
+    )
+    start = 0 if world_at is None else world_at + 1
+    story_ids = [
+        message.id
+        for message in messages[start:]
+        if isinstance(message, HumanMessage) and message.id
+    ]
+    return {
+        message_id: turn - (len(story_ids) - 1 - index)
+        for index, message_id in enumerate(story_ids)
+    }
 
-    matches = [item for item in story.turn_summaries if item.user_message_id == user_message_id]
-    if matches:
-        cut_turn = min(item.turn for item in matches)
-        # One summary is stored per turn, numbered from 1.
-        kept = story.turn_summaries[: cut_turn - 1]
-        events = [event for event in story.events if event.turn < cut_turn]
-    else:
-        kept = []
-        events = []
 
+def _apply_event_cut(story: Story, cut_turn: int) -> tuple[int, Story]:
+    """Drop events and summaries from ``cut_turn`` onward. World and characters stay."""
+    if cut_turn < 1:
+        cut_turn = 1
+    kept = [item for item in story.turn_summaries if item.turn < cut_turn]
+    events = [event for event in story.events if event.turn < cut_turn]
     if kept:
         summary = kept[-1].summary
         title = kept[-1].title
-        turn = kept[-1].turn
-    else:
+        restored_turn = max(kept[-1].turn, cut_turn - 1)
+    elif cut_turn <= 1:
         summary = "None"
         title = "Untitled"
-        turn = 0
-
-    return turn, story.model_copy(
+        restored_turn = 0
+    else:
+        summary = story.summary
+        title = story.title
+        restored_turn = cut_turn - 1
+    return restored_turn, story.model_copy(
         update={
             "summary": summary,
             "title": title,
@@ -64,6 +80,38 @@ def _rewound_story(story: Optional[Story], user_message_id: str) -> tuple[int, O
             "turn_summaries": kept,
         }
     )
+
+
+def _rewound_story(
+    story: Optional[Story],
+    user_message_id: str,
+    *,
+    messages: list | None = None,
+    turn: int = 0,
+) -> tuple[int, Optional[Story]]:
+    """Drop events and summaries from the chosen user message's turn onward.
+
+    World, characters, and lock fields stay. A snapshotted line cuts at its
+    recorded turn. A story line with no snapshot still cuts at the turn counted
+    back from the current turn, so later events leave with that line. A
+    world-building line clears the story events.
+    """
+    if story is None:
+        return 0, None
+
+    target_turns = [
+        item.turn for item in story.turn_summaries if item.user_message_id == user_message_id
+    ]
+    if target_turns:
+        return _apply_event_cut(story, min(target_turns))
+
+    if messages:
+        inferred = _story_message_turns(messages, turn)
+        if user_message_id in inferred:
+            return _apply_event_cut(story, inferred[user_message_id])
+        return _apply_event_cut(story, 1)
+
+    return turn, story
 
 
 class Storyteller:
@@ -526,7 +574,10 @@ class Storyteller:
             raise KeyError(user_message_id)
 
         turn, story = _rewound_story(
-            coerce_story((snap.values or {}).get("story")), user_message_id
+            coerce_story((snap.values or {}).get("story")),
+            user_message_id,
+            messages=messages,
+            turn=(snap.values or {}).get("turn") or 0,
         )
         update: dict = {
             "messages": [RemoveMessage(id=message.id) for message in messages[cut:] if message.id],
