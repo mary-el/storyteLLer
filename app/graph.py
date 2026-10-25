@@ -456,7 +456,7 @@ class Storyteller:
                 continue
             text = strip_thinking(message_text(m))
             if text:
-                history.append({"role": role, "content": text})
+                history.append({"role": role, "content": text, "id": m.id or ""})
         story = coerce_story(values.get("story"))
         return {
             "phase": values.get("phase", "world"),

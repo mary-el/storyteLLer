@@ -8,7 +8,6 @@ from pydantic import BaseModel
 from app.utils import (
     invoke_structured,
     message_text,
-    parse_last_json,
     split_thinking,
     strip_thinking,
     visible_response,
@@ -55,30 +54,10 @@ class TestStripThinking:
         assert strip_thinking(42) == "42"
 
 
-class TestParseLastJson:
-    def test_valid_json(self):
-        msg = AIMessage(content='{"node": "dialogue", "response": "hi"}')
-        assert parse_last_json([msg]) == {"node": "dialogue", "response": "hi"}
-
-    def test_invalid_json_returns_empty(self):
-        msg = AIMessage(content="not json at all")
-        assert parse_last_json([msg]) == {}
-
-    def test_empty_messages(self):
-        assert parse_last_json([]) == {}
-
-    def test_uses_last_message(self):
-        msgs = [
-            AIMessage(content='{"node": "first"}'),
-            AIMessage(content='{"node": "last"}'),
-        ]
-        assert parse_last_json(msgs) == {"node": "last"}
-
-
 class TestMessageText:
-    def test_ai_message_json_wire_format(self):
-        msg = AIMessage(content=json.dumps({"node": "dialogue", "response": "Story text"}))
-        assert message_text(msg) == "Story text"
+    def test_json_content_is_left_intact(self):
+        raw = json.dumps({"node": "dialogue", "response": "Story text"})
+        assert message_text(AIMessage(content=raw)) == raw
 
     def test_ai_message_plain_content(self):
         msg = AIMessage(content="plain reply")
@@ -88,16 +67,15 @@ class TestMessageText:
         msg = HumanMessage(content="user input")
         assert message_text(msg) == "user input"
 
-    def test_null_response_field(self):
-        msg = AIMessage(content=json.dumps({"node": "begin_story", "response": None}))
-        assert message_text(msg) == ""
+    def test_empty_content(self):
+        assert message_text(AIMessage(content="")) == ""
 
 
 class TestVisibleResponse:
-    def test_json_wire_format(self):
+    def test_returns_last_ai_message(self):
         msgs = [
             HumanMessage(content="hi"),
-            AIMessage(content=json.dumps({"node": "dialogue", "response": "Narrative."})),
+            AIMessage(content="Narrative."),
         ]
         assert visible_response(msgs) == "Narrative."
 
@@ -106,8 +84,8 @@ class TestVisibleResponse:
         assert visible_response(msgs) == "plain narration"
 
     def test_strips_thinking_from_response(self):
-        payload = json.dumps({"response": "<think>internal</think>Visible part"})
-        assert visible_response([AIMessage(content=payload)]) == "Visible part"
+        msg = AIMessage(content="<think>internal</think>Visible part")
+        assert visible_response([msg]) == "Visible part"
 
     def test_no_ai_message(self):
         assert visible_response([HumanMessage(content="only human")]) == ""

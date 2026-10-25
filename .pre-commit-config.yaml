@@ -48,3 +48,13 @@ repos:
         args: ['--max-line-length=180', '--extend-ignore=E203,W503,D']
         additional_dependencies:
           - flake8-bugbear
+
+  # Tests use the project environment (language: system), not an isolated hook env.
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest
+        entry: uv run pytest -q
+        language: system
+        pass_filenames: false
+        always_run: true

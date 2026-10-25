@@ -36,9 +36,14 @@ class TurnRequest(BaseModel):
     message: str = Field(min_length=1)
 
 
+class RewindRequest(BaseModel):
+    user_message_id: str = Field(min_length=1)
+
+
 class ChatMessage(BaseModel):
     role: str
     content: str
+    id: str
 
 
 class ThreadState(BaseModel):
@@ -220,6 +225,27 @@ def create_app(storyteller: Optional[Storyteller] = None) -> FastAPI:
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    @app.post("/threads/{thread_id}/rewind", response_model=ThreadState)
+    async def rewind(
+        thread_id: str,
+        body: RewindRequest,
+        st: StorytellerDep,
+        x_user_id: UserIdHeader = "1",
+    ) -> dict:
+        await require_state(st, x_user_id, thread_id)
+        lock = thread_lock(thread_id)
+        if lock.locked():
+            raise HTTPException(status_code=409, detail="A turn is already in progress")
+        async with lock:
+            try:
+                await st.rewind_to_user_message(x_user_id, thread_id, body.user_message_id)
+            except KeyError:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Message '{body.user_message_id}' not found",
+                ) from None
+            return await require_state(st, x_user_id, thread_id)
 
     @app.patch("/threads/{thread_id}/world", response_model=ThreadState)
     async def update_world(
