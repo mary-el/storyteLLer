@@ -120,13 +120,15 @@ On load, checkpoint state is rebuilt from the saved `Story`.
    - **`add_event`** — a key event worth archiving; routes (in parallel) to `archive`.
    - Otherwise (no character changes, no event) — falls straight through to `finalize_turn`.
 
-`character_agent` and `archive` fan back into `finalize_turn`, which increments `turn`, merges in the summary/event, and appends one summary snapshot for that turn.
+`character_agent` and `archive` fan back into `finalize_turn`, which stamps the summary/event with the current user-message number and appends a summary snapshot.
 
 ## Memory
 
 The `Story` aggregate on graph state holds `world`, `characters`, `summary`, `events`, and `turn_summaries`. After a turn flagged with `add_event`, `archive` refreshes `Story.summary` and appends a `StoryEvent`. Every story turn also stores a snapshot of the summary, title, and the user message that produced it. The narrator still reads the latest `summary`. The same aggregate is what gets written to the save file.
 
-Rewriting a user message drops that message and every graph message after it. If that line has a summary snapshot, events and snapshots from its turn onward are dropped and the summary rolls back to the previous snapshot. A story line from before snapshots were recorded is counted back from the current turn, so events from that turn onward still drop and the next reply continues there. Rewriting a world-building line clears the story events. The world, characters, and field locks stay either way.
+Turn numbers are one-based user-message positions, including world setup. Assistant and system messages do not count. The API and saved session's `turn` are derived from the transcript; there is no separate counter.
+
+Rewriting user message N drops that message and every graph message after it, along with events and summary snapshots numbered N or later. The summary and title roll back to the latest retained snapshot, or their initial values if none remains. The replacement message and its reply stay at turn N. The world, characters, and field locks stay.
 
 During story play, `character_agent` handles each of the narrator's plain-language commands with its own trustcall call (inserts enabled) — passing every existing character (tagged with its own id) alongside it — so the model decides, per command, whether to patch an existing character or create a new one. Processing sequentially also means a later command in the same turn can see a character a prior command in that turn just created. Locked fields on a patched character are restored from the previous value, so the narrator cannot overwrite them.
 

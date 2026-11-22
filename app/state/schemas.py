@@ -48,14 +48,14 @@ StoryStep = Literal["world", "story"]
 
 
 class StoryEvent(BaseModel):
-    """A key event extracted from the narrative."""
+    """A key event; turn is its producing user message's one-based position."""
 
     turn: int
     event: str
 
 
 class TurnSummary(BaseModel):
-    """The rolling summary as it stood at the end of one story turn."""
+    """Summary after a user message, numbered by its one-based position."""
 
     turn: int
     summary: str
@@ -161,7 +161,6 @@ class StorytellerState(State):
 
     story: NotRequired[Annotated[Optional[Story], _story_reducer]]
     phase: NotRequired[StoryStep]
-    turn: NotRequired[int]
     # Ephemeral routing metadata written by story_node, read by routing functions
     # and sibling nodes; cleared after each turn.
     _pending_response: NotRequired[str]

@@ -10,6 +10,7 @@ from typing import Any
 
 from langchain_core.messages import BaseMessage, message_to_dict, messages_from_dict
 
+from app.history import user_messages
 from app.state.schemas import Story
 
 
@@ -17,7 +18,6 @@ def save_story(
     story: Story,
     messages: list[BaseMessage],
     phase: str,
-    turn: int,
     thread_id: str,
     saves_dir: str | Path,
 ) -> Path:
@@ -32,7 +32,7 @@ def save_story(
         "saved_at": datetime.now(timezone.utc).isoformat(),
         "thread_id": thread_id,
         "phase": phase,
-        "turn": turn,
+        "turn": len(user_messages(messages)),
         "story": story.model_dump(mode="json"),
         "messages": [message_to_dict(m) for m in messages],
     }
@@ -63,7 +63,7 @@ def list_saves(saves_dir: str | Path) -> list[dict[str, Any]]:
                     "title": data.get("title", "Untitled"),
                     "saved_at": data.get("saved_at", ""),
                     "phase": data.get("phase", ""),
-                    "turn": data.get("turn", 0),
+                    "turn": len(user_messages(reconstruct_messages(data.get("messages", [])))),
                     "path": str(file),
                 }
             )

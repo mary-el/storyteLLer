@@ -12,6 +12,7 @@ from app import persistence
 from app.agents.character_agent import CharacterAgent
 from app.agents.world_gen import WorldGenerator
 from app.config import AppConfig, load_app_config
+from app.history import rewound_story, user_messages
 from app.state.schemas import Story, StoryEvent, StorytellerState, TurnSummary, coerce_story
 from app.utils import (
     STRUCTURED_OUTPUT_ERROR,
@@ -26,92 +27,6 @@ from app.utils import (
 )
 
 dotenv.load_dotenv()
-
-
-def _story_message_turns(messages: list, turn: int) -> dict[str, int]:
-    """Map each story user-message id to the turn that line produced.
-
-    The newest story line is ``turn``. Earlier story lines count backward.
-    Lines before the world was created are not story turns.
-    """
-    world_at = next(
-        (
-            index
-            for index, message in enumerate(messages)
-            if isinstance(message, SystemMessage) and "OBJECT_CREATED" in message_text(message)
-        ),
-        None,
-    )
-    start = 0 if world_at is None else world_at + 1
-    story_ids = [
-        message.id
-        for message in messages[start:]
-        if isinstance(message, HumanMessage) and message.id
-    ]
-    return {
-        message_id: turn - (len(story_ids) - 1 - index)
-        for index, message_id in enumerate(story_ids)
-    }
-
-
-def _apply_event_cut(story: Story, cut_turn: int) -> tuple[int, Story]:
-    """Drop events and summaries from ``cut_turn`` onward. World and characters stay."""
-    if cut_turn < 1:
-        cut_turn = 1
-    kept = [item for item in story.turn_summaries if item.turn < cut_turn]
-    events = [event for event in story.events if event.turn < cut_turn]
-    if kept:
-        summary = kept[-1].summary
-        title = kept[-1].title
-        restored_turn = max(kept[-1].turn, cut_turn - 1)
-    elif cut_turn <= 1:
-        summary = "None"
-        title = "Untitled"
-        restored_turn = 0
-    else:
-        summary = story.summary
-        title = story.title
-        restored_turn = cut_turn - 1
-    return restored_turn, story.model_copy(
-        update={
-            "summary": summary,
-            "title": title,
-            "events": events,
-            "turn_summaries": kept,
-        }
-    )
-
-
-def _rewound_story(
-    story: Optional[Story],
-    user_message_id: str,
-    *,
-    messages: list | None = None,
-    turn: int = 0,
-) -> tuple[int, Optional[Story]]:
-    """Drop events and summaries from the chosen user message's turn onward.
-
-    World, characters, and lock fields stay. A snapshotted line cuts at its
-    recorded turn. A story line with no snapshot still cuts at the turn counted
-    back from the current turn, so later events leave with that line. A
-    world-building line clears the story events.
-    """
-    if story is None:
-        return 0, None
-
-    target_turns = [
-        item.turn for item in story.turn_summaries if item.user_message_id == user_message_id
-    ]
-    if target_turns:
-        return _apply_event_cut(story, min(target_turns))
-
-    if messages:
-        inferred = _story_message_turns(messages, turn)
-        if user_message_id in inferred:
-            return _apply_event_cut(story, inferred[user_message_id])
-        return _apply_event_cut(story, 1)
-
-    return turn, story
 
 
 class Storyteller:
@@ -282,15 +197,14 @@ class Storyteller:
         }
 
     async def finalize_turn_node(self, state: StorytellerState) -> StorytellerState:
-        """Fan-in: merge _turn_summary + _new_event into story; increment turn."""
+        """Fan-in: stamp records with the current user-message position."""
         turn_summary = state.get("_turn_summary")
         turn_title = state.get("_turn_title")
         new_event: StoryEvent | None = state.get("_new_event")  # type: ignore[assignment]
-        turn = (state.get("turn") or 0) + 1
+        turn = len(user_messages(state.get("messages") or []))
         story = state.get("story")
 
         updates: dict = {
-            "turn": turn,
             "_turn_summary": None,
             "_turn_title": None,
             "_new_event": None,
@@ -425,9 +339,8 @@ class Storyteller:
             return
         messages = result.get("messages", [])
         phase = result.get("phase", "world")
-        turn = result.get("turn", 0)
         try:
-            path = persistence.save_story(story, messages, phase, turn, thread_id, self.saves_dir)
+            path = persistence.save_story(story, messages, phase, thread_id, self.saves_dir)
             logger.debug(f"Auto-saved to {path}")
         except Exception as e:
             logger.error(f"Auto-save failed: {e}")
@@ -508,7 +421,7 @@ class Storyteller:
         story = coerce_story(values.get("story"))
         return {
             "phase": values.get("phase", "world"),
-            "turn": values.get("turn", 0),
+            "turn": len(user_messages(values.get("messages") or [])),
             "story": story.model_dump(mode="json") if story else None,
             "awaiting_feedback": bool(snap.interrupts),
             "pending_prompt": (
@@ -523,7 +436,6 @@ class Storyteller:
         story = Story.model_validate(save_data["story"])
         messages = persistence.reconstruct_messages(save_data.get("messages", []))
         phase = save_data.get("phase", "world")
-        turn = save_data.get("turn", 0)
 
         # Reset only this thread so no old state bleeds in; other threads stay intact.
         if self.checkpointer is not None:
@@ -536,11 +448,12 @@ class Storyteller:
                 "messages": messages,
                 "story": story,
                 "phase": phase,
-                "turn": turn,
                 "user_id": user_id,
             },
         )
-        logger.info(f"Loaded save '{story.title}' (phase={phase}, turn={turn})")
+        logger.info(
+            f"Loaded save '{story.title}' (phase={phase}, turn={len(user_messages(messages))})"
+        )
 
     async def update_story(self, story: Story, user_id: str, thread_id: str = None) -> None:
         """Replace the thread's story with a manually edited one and persist it."""
@@ -573,15 +486,12 @@ class Storyteller:
         if cut is None:
             raise KeyError(user_message_id)
 
-        turn, story = _rewound_story(
-            coerce_story((snap.values or {}).get("story")),
-            user_message_id,
-            messages=messages,
-            turn=(snap.values or {}).get("turn") or 0,
-        )
+        cut_turn = len(user_messages(messages[:cut])) + 1
+        story = coerce_story((snap.values or {}).get("story"))
+        if story is not None:
+            story = rewound_story(story, cut_turn)
         update: dict = {
             "messages": [RemoveMessage(id=message.id) for message in messages[cut:] if message.id],
-            "turn": turn,
         }
         if story is not None:
             update["story"] = story
