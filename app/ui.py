@@ -44,7 +44,7 @@ def _tell(text: str) -> str:
     return asyncio.run(st.session_state.storyteller.tell(text, _USER_ID, _thread_id()))
 
 
-_REWRITE_KEYS = ("rewrite_message_id", "rewrite_draft", "rewrite_confirm")
+_REWRITE_KEYS = ("rewrite_message_id", "rewrite_draft", "rewrite_confirm", "rewrite_scroll")
 
 
 def _drop_rewrite_state() -> None:
@@ -229,17 +229,19 @@ def _render_sidebar(story) -> None:
 def _render_history() -> None:
     user_ids = _graph_user_message_ids()
     user_index = 0
+    rewriting_id = st.session_state.get("rewrite_message_id")
     for msg in st.session_state.messages:
+        message_id = ""
+        if msg.get("role") == "user":
+            message_id = user_ids[user_index] if user_index < len(user_ids) else ""
+            user_index += 1
+            if rewriting_id and message_id == rewriting_id:
+                break
         with st.chat_message(msg["role"]):
             if msg["role"] == "assistant":
                 _render_assistant_message(msg["content"], msg.get("thinking"))
                 continue
-            if msg.get("role") != "user":
-                st.markdown(msg["content"])
-                continue
-            message_id = user_ids[user_index] if user_index < len(user_ids) else ""
-            user_index += 1
-            if not message_id:
+            if msg.get("role") != "user" or not message_id or rewriting_id:
                 st.markdown(msg["content"])
                 continue
             text_col, rewrite_col = st.columns([15, 1], vertical_alignment="center")
@@ -255,6 +257,7 @@ def _render_history() -> None:
                     st.session_state.rewrite_message_id = message_id
                     st.session_state.rewrite_draft = msg["content"]
                     st.session_state.rewrite_confirm = False
+                    st.session_state.rewrite_scroll = True
                     st.rerun()
 
 
@@ -311,13 +314,32 @@ def _commit_rewrite() -> None:
     st.rerun()
 
 
+_REWRITE_SCROLL_JS = """
+<script>
+const doc = window.parent.document;
+let tries = 0;
+function reveal() {
+  const anchor = doc.getElementById("rewrite-anchor");
+  if (!anchor) {
+    if (tries++ < 20) setTimeout(reveal, 50);
+    return;
+  }
+  anchor.scrollIntoView({behavior: "smooth", block: "center"});
+  const area = doc.querySelector('textarea[aria-label="Your reply…"]');
+  if (area) area.focus();
+}
+reveal();
+</script>
+"""
+
+
 def _render_rewrite_composer() -> None:
+    st.markdown('<div id="rewrite-anchor"></div>', unsafe_allow_html=True)
+    if st.session_state.pop("rewrite_scroll", False):
+        st.iframe(_REWRITE_SCROLL_JS, height=1)
     st.text_area("Your reply…", key="rewrite_draft", label_visibility="collapsed")
     if st.session_state.get("rewrite_confirm"):
-        st.caption(
-            "This message and everything after it will be removed, including later events. "
-            "World and characters stay as they are."
-        )
+        st.caption("This message and everything after it will be removed, including later events.")
         confirm_col, cancel_col = st.columns(2)
         with confirm_col:
             if st.button(
